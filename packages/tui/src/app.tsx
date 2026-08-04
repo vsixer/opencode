@@ -48,6 +48,7 @@ import { DialogThemeList } from "./component/dialog-theme-list"
 import { DialogHelp } from "./ui/dialog-help"
 import { DialogAgent } from "./component/dialog-agent"
 import { DialogSessionList } from "./component/dialog-session-list"
+import { DialogBtw } from "./routes/session/dialog-btw"
 import { DialogWorkspaceList } from "./component/dialog-workspace-list"
 import { DialogConsoleOrg } from "./component/dialog-console-org"
 import { ThemeProvider, useTheme } from "./context/theme"
@@ -593,6 +594,18 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
         },
       },
       {
+        name: "session.btw",
+        title: "Open btw side chat",
+        suggested: route.data.type === "session",
+        category: "Session",
+        slashName: "btw",
+        run: () => {
+          const data = route.data
+          if (data.type !== "session") return
+          dialog.replace(() => <DialogBtw parentID={data.sessionID} />)
+        },
+      },
+      {
         name: "workspace.copy_path",
         title: "Copy worktree path",
         category: "Workspace",
@@ -980,6 +993,24 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
       return current.current.input === ""
     },
     bindings: tuiConfig.keybinds.gather("app_exit", ["app.exit"]),
+  }))
+
+  // Escape-hatch: в modal-режиме app.exit (base-only) мёртв, а диалог перехватывает
+  // ctrl+c на закрытие. ctrl+d даёт гарантированный выход даже из зависшей модалки:
+  // сначала чистим стек (onCleanup btw прервёт тур и снимет busy), затем штатный exit.
+  useBindings(() => ({
+    mode: "modal",
+    bindings: [
+      {
+        key: "ctrl+d",
+        desc: "Exit (closes dialog first)",
+        group: "App",
+        cmd: () => {
+          dialog.clear()
+          exit()
+        },
+      },
+    ],
   }))
 
   event.on("tui.command.execute", (evt, { workspace }) => {

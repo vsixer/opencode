@@ -15,6 +15,14 @@ import type {
   AuthRemoveResponses,
   AuthSetErrors,
   AuthSetResponses,
+  BtwAbortErrors,
+  BtwAbortResponses,
+  BtwCloseErrors,
+  BtwCloseResponses,
+  BtwOpenErrors,
+  BtwOpenResponses,
+  BtwSendErrors,
+  BtwSendResponses,
   CommandListErrors,
   CommandListResponses,
   Config as Config3,
@@ -1410,6 +1418,153 @@ export class Event extends HeyApiClient {
       url: "/event",
       ...options,
       ...params,
+    })
+  }
+}
+
+export class Btw extends HeyApiClient {
+  /**
+   * Open ephemeral btw chat
+   *
+   * Open an ephemeral side-chat frozen on the current parent session context.
+   */
+  public open<ThrowOnError extends boolean = false>(
+    parameters?: {
+      directory?: string
+      workspace?: string
+      parentID?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+            { in: "body", key: "parentID" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).post<BtwOpenResponses, BtwOpenErrors, ThrowOnError>({
+      url: "/btw/open",
+      ...options,
+      ...params,
+      headers: {
+        "Content-Type": "application/json",
+        ...options?.headers,
+        ...params.headers,
+      },
+    })
+  }
+
+  /**
+   * Send a message to btw chat
+   *
+   * Send a follow-up message; response is an SSE stream of BtwPart chunks.
+   */
+  public send<ThrowOnError extends boolean = false>(
+    parameters: {
+      directory?: string
+      workspace?: string
+      btwID: string
+      text: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+            { in: "query", key: "btwID" },
+            { in: "query", key: "text" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).sse.get<BtwSendResponses, BtwSendErrors, ThrowOnError>({
+      url: "/btw/send",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
+   * Close btw chat
+   *
+   * Close the ephemeral side-chat and drop its in-memory state.
+   */
+  public close<ThrowOnError extends boolean = false>(
+    parameters?: {
+      directory?: string
+      workspace?: string
+      btwID?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+            { in: "body", key: "btwID" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).post<BtwCloseResponses, BtwCloseErrors, ThrowOnError>({
+      url: "/btw/close",
+      ...options,
+      ...params,
+      headers: {
+        "Content-Type": "application/json",
+        ...options?.headers,
+        ...params.headers,
+      },
+    })
+  }
+
+  /**
+   * Abort active btw turn
+   *
+   * Abort the in-flight turn of an ephemeral side-chat without closing it.
+   */
+  public abort<ThrowOnError extends boolean = false>(
+    parameters?: {
+      directory?: string
+      workspace?: string
+      btwID?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+            { in: "body", key: "btwID" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).post<BtwAbortResponses, BtwAbortErrors, ThrowOnError>({
+      url: "/btw/abort",
+      ...options,
+      ...params,
+      headers: {
+        "Content-Type": "application/json",
+        ...options?.headers,
+        ...params.headers,
+      },
     })
   }
 }
@@ -7105,6 +7260,11 @@ export class OpencodeClient extends HeyApiClient {
   private _event?: Event
   get event(): Event {
     return (this._event ??= new Event({ client: this.client }))
+  }
+
+  private _btw?: Btw
+  get btw(): Btw {
+    return (this._btw ??= new Btw({ client: this.client }))
   }
 
   private _config?: Config2

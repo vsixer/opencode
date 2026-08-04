@@ -2029,6 +2029,12 @@ export type Config = {
   }
 }
 
+export type SessionNotFoundError = {
+  _tag: "SessionNotFoundError"
+  sessionID: string
+  message: string
+}
+
 export type Model = {
   id: string
   providerID: string
@@ -2697,12 +2703,6 @@ export type InvalidCursorError = {
 
 export type SessionActive = {
   type: "running"
-}
-
-export type SessionNotFoundError = {
-  _tag: "SessionNotFoundError"
-  sessionID: string
-  message: string
 }
 
 export type PromptInput = {
@@ -7404,6 +7404,136 @@ export type EventSubscribeResponses = {
 }
 
 export type EventSubscribeResponse = EventSubscribeResponses[keyof EventSubscribeResponses]
+
+export type BtwOpenData = {
+  body?: {
+    parentID: string
+  }
+  path?: never
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/btw/open"
+}
+
+export type BtwOpenErrors = {
+  /**
+   * InvalidRequestError
+   */
+  400: InvalidRequestError
+  /**
+   * SessionNotFoundError
+   */
+  404: SessionNotFoundError
+}
+
+export type BtwOpenError = BtwOpenErrors[keyof BtwOpenErrors]
+
+export type BtwOpenResponses = {
+  /**
+   * btw session opened
+   */
+  200: {
+    btwID: string
+  }
+}
+
+export type BtwOpenResponse = BtwOpenResponses[keyof BtwOpenResponses]
+
+export type BtwSendData = {
+  body?: never
+  path?: never
+  query: {
+    directory?: string
+    workspace?: string
+    btwID: string
+    text: string
+  }
+  url: "/btw/send"
+}
+
+export type BtwSendErrors = {
+  /**
+   * BadRequest | InvalidRequestError
+   */
+  400: EffectHttpApiErrorBadRequest | InvalidRequestError
+}
+
+export type BtwSendError = BtwSendErrors[keyof BtwSendErrors]
+
+export type BtwSendResponses = {
+  /**
+   * Success
+   */
+  200: string
+}
+
+export type BtwSendResponse = BtwSendResponses[keyof BtwSendResponses]
+
+export type BtwCloseData = {
+  body?: {
+    btwID: string
+  }
+  path?: never
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/btw/close"
+}
+
+export type BtwCloseErrors = {
+  /**
+   * BadRequest | InvalidRequestError
+   */
+  400: EffectHttpApiErrorBadRequest | InvalidRequestError
+}
+
+export type BtwCloseError = BtwCloseErrors[keyof BtwCloseErrors]
+
+export type BtwCloseResponses = {
+  /**
+   * btw session closed
+   */
+  200: {
+    ok: boolean
+  }
+}
+
+export type BtwCloseResponse = BtwCloseResponses[keyof BtwCloseResponses]
+
+export type BtwAbortData = {
+  body?: {
+    btwID: string
+  }
+  path?: never
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/btw/abort"
+}
+
+export type BtwAbortErrors = {
+  /**
+   * BadRequest | InvalidRequestError
+   */
+  400: EffectHttpApiErrorBadRequest | InvalidRequestError
+}
+
+export type BtwAbortError = BtwAbortErrors[keyof BtwAbortErrors]
+
+export type BtwAbortResponses = {
+  /**
+   * btw turn aborted
+   */
+  200: {
+    ok: boolean
+  }
+}
+
+export type BtwAbortResponse = BtwAbortResponses[keyof BtwAbortResponses]
 
 export type ConfigGetData = {
   body?: never
