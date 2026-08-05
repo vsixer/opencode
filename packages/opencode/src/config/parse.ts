@@ -52,6 +52,17 @@ export function schema<S extends EffectSchema.Decoder<unknown, never>>(
     })
   }
 
+  return decode(schema, data, source)
+}
+
+// Lenient-декод: валидирует типы полей, но НЕ отбивает неизвестные top-level ключи.
+// Используется для command frontmatter — исторически extra-keys (reasoningEffort и др.)
+// пропускались молча, и это поведение сохраняется после перехода на слоистый merge.
+export function decode<S extends EffectSchema.Decoder<unknown, never>>(
+  schema: S,
+  data: unknown,
+  source: string,
+): DeepMutable<S["Type"]> {
   const decoded = EffectSchema.decodeUnknownExit(schema)(data, { errors: "all", propertyOrder: "original" })
   if (Exit.isSuccess(decoded)) return decoded.value as DeepMutable<S["Type"]>
   const error = Cause.squash(decoded.cause)

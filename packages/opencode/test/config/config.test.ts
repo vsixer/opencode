@@ -890,6 +890,27 @@ Nested command template`,
   }),
 )
 
+it.instance("command frontmatter tolerates unknown extra keys (e.g. reasoningEffort)", () =>
+  Effect.gen(function* () {
+    const test = yield* TestInstance
+    yield* FSUtil.use.writeWithDirs(
+      path.join(test.directory, ".opencode", "command", "extra.md"),
+      `---
+description: Command with extra key
+reasoningEffort: high
+---
+Body`,
+    )
+
+    const config = yield* Config.use.get()
+    // extra-keys исторически пропускаются молча (lenient decode), не отбиваются как ошибка
+    expect(config.command?.["extra"]).toEqual({
+      description: "Command with extra key",
+      template: "Body",
+    })
+  }),
+)
+
 it.instance("updates config and writes to file", () =>
   Effect.gen(function* () {
     const test = yield* TestInstance

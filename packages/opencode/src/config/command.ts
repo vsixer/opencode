@@ -1,17 +1,16 @@
 export * as ConfigCommand from "./command"
 
 import path from "path"
-import { Cause, Exit, Schema } from "effect"
 import { Glob } from "@opencode-ai/core/util/glob"
-import { ConfigCommandV1 } from "@opencode-ai/core/v1/config/command"
 import { configEntryNameFromPath } from "./entry-name"
-import { InvalidError } from "@opencode-ai/core/v1/config/error"
 import * as ConfigMarkdown from "./markdown"
+import type { ConfigMerge } from "./merge"
+import { isRecord } from "@/util/record"
 
-const decodeInfo = Schema.decodeUnknownExit(ConfigCommandV1.Info)
-
-export async function load(dir: string) {
-  const result: Record<string, ConfigCommandV1.Info> = {}
+// Возвращает raw-определения команд ДО schema-decode.
+// Слоистое слияние (fold) и финальный decode выполняются в config.ts.
+export async function load(dir: string): Promise<Record<string, ConfigMerge.Definition>> {
+  const result: Record<string, ConfigMerge.Definition> = {}
   for (const item of await Glob.scan("{command,commands}/**/*.md", {
     cwd: dir,
     absolute: true,
@@ -21,19 +20,11 @@ export async function load(dir: string) {
     const md = await ConfigMarkdown.parse(item).catch(() => undefined)
     if (!md) continue
 
-    const name = configEntryNameFromPath(path.relative(dir, item), ["command/", "commands/"])
-
-    const config = {
-      name,
-      ...md.data,
-      template: md.content.trim(),
+    result[configEntryNameFromPath(path.relative(dir, item), ["command/", "commands/"])] = {
+      frontmatter: isRecord(md.data) ? md.data : {},
+      body: md.content.trim(),
+      source: item,
     }
-    const parsed = decodeInfo(config, { errors: "all", propertyOrder: "original" })
-    if (Exit.isSuccess(parsed)) {
-      result[config.name] = parsed.value
-      continue
-    }
-    throw new InvalidError({ path: item, message: Cause.pretty(parsed.cause) }, { cause: Cause.squash(parsed.cause) })
   }
   return result
 }

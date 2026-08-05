@@ -10,6 +10,7 @@ import { SkillPlugin } from "@opencode-ai/core/plugin/skill"
 import { Permission } from "@/permission"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { Config } from "@/config/config"
+import { ConfigMerge } from "@/config/merge"
 import { FrontmatterError } from "@opencode-ai/core/v1/config/error"
 import { ConfigMarkdown } from "@/config/markdown"
 import { RuntimeFlags } from "@/effect/runtime-flags"
@@ -84,25 +85,28 @@ type State = {
   dirs: Set<string>
 }
 
+// Слоистое слияние применяется только к opencode-configDir слоям (global .opencode
+// vs project .opencode). External (.claude/.agents), skills.paths и skills.urls
+// остаются «как есть» — last-write-wins поверх склеенных opencode-слоёв.
 type DiscoveryState = {
-  matches: string[]
+  opencodeLayers: { layer: string; matches: string[] }[]
+  plainMatches: string[]
   dirs: string[]
 }
 
-type ScanState = {
-  matches: Set<string>
-  dirs: Set<string>
+// Проверяет, входит ли dir в workspace — для метки слоя (project vs global) в provenance.
+function classifySkillLayer(dir: string, directory: string, worktree?: string): string {
+  const within = (base: string) => dir === base || dir.startsWith(base + path.sep)
+  if (within(directory) || (worktree !== undefined && within(worktree))) return "project"
+  return "global"
 }
 
-export interface Interface {
-  readonly get: (name: string) => Effect.Effect<Info | undefined>
-  readonly require: (name: string) => Effect.Effect<Info, NotFoundError>
-  readonly all: () => Effect.Effect<Info[]>
-  readonly dirs: () => Effect.Effect<string[]>
-  readonly available: (agent?: Agent.Info) => Effect.Effect<Info[]>
-}
-
-const add = Effect.fnUntraced(function* (state: State, match: string, events: EventV2Bridge.Service["Service"]) {
+// Парсит один SKILL.md в raw Definition (до frontmatter-merge).
+// При ошибке парсинга публикует Session.Event.Error и логирует — как раньше.
+const parseSkillFile = Effect.fnUntraced(function* (
+  match: string,
+  events: EventV2Bridge.Service["Service"],
+) {
   const md = yield* Effect.tryPromise({
     try: () => ConfigMarkdown.parse(match),
     catch: (err) => err,
@@ -118,29 +122,36 @@ const add = Effect.fnUntraced(function* (state: State, match: string, events: Ev
     ),
   )
 
-  if (!md) return
+  if (!md) return undefined
+  if (!isSkillFrontmatter(md.data)) return undefined
+  return { frontmatter: md.data as Record<string, unknown>, body: md.content, source: match }
+})
 
-  if (!isSkillFrontmatter(md.data)) return
+// Добавляет одиночный skill поверх уже загруженных (last-write-wins).
+// Используется для plain-источников: external dirs, skills.paths, skills.urls.
+const addPlain = Effect.fnUntraced(function* (state: State, match: string, events: EventV2Bridge.Service["Service"]) {
+  const def = yield* parseSkillFile(match, events)
+  if (!def) return
 
-  if (state.skills[md.data.name]) {
+  const name = def.frontmatter.name as string
+  if (state.skills[name]) {
     yield* Effect.logWarning("duplicate skill name", {
-      name: md.data.name,
-      existing: state.skills[md.data.name].location,
+      name,
+      existing: state.skills[name].location,
       duplicate: match,
     })
   }
 
   state.dirs.add(path.dirname(match))
-  state.skills[md.data.name] = {
-    name: md.data.name,
-    description: md.data.description,
+  state.skills[name] = {
+    name,
+    description: typeof def.frontmatter.description === "string" ? def.frontmatter.description : undefined,
     location: match,
-    content: md.content,
+    content: def.body,
   }
 })
 
-const scan = Effect.fnUntraced(function* (
-  state: ScanState,
+const scanDir = Effect.fnUntraced(function* (
   root: string,
   pattern: string,
   opts?: { dot?: boolean; scope?: string },
@@ -163,11 +174,7 @@ const scan = Effect.fnUntraced(function* (
       )
     }),
   )
-
-  for (const match of matches) {
-    state.matches.add(match)
-    state.dirs.add(path.dirname(match))
-  }
+  return matches
 })
 
 const discoverSkills = Effect.fnUntraced(function* (
@@ -175,22 +182,32 @@ const discoverSkills = Effect.fnUntraced(function* (
   discovery: Discovery.Interface,
   fsys: FSUtil.Interface,
   global: Global.Interface,
+  events: EventV2Bridge.Service["Service"],
   disableExternalSkills: boolean,
   disableClaudeCodeSkills: boolean,
   directory: string,
   worktree: string,
 ) {
-  const state: ScanState = { matches: new Set(), dirs: new Set() }
+  const plainMatches: string[] = []
+  const dirs = new Set<string>()
+  const opencodeLayers: { layer: string; matches: string[] }[] = []
 
-  const externalDirs: string[] = []
+  const collect = Effect.fnUntraced(function* (root: string, pattern: string, opts?: { dot?: boolean; scope?: string }) {
+    const matches = yield* scanDir(root, pattern, opts)
+    for (const m of matches) dirs.add(path.dirname(m))
+    return matches
+  })
+
+  // External skill dirs (.claude, .agents) — вне layered merge.
   if (!disableExternalSkills) {
+    const externalDirs: string[] = []
     if (!disableClaudeCodeSkills) externalDirs.push(CLAUDE_EXTERNAL_DIR)
     externalDirs.push(AGENTS_EXTERNAL_DIR)
 
     for (const dir of externalDirs) {
       const root = path.join(global.home, dir)
       if (!(yield* fsys.isDir(root))) continue
-      yield* scan(state, root, EXTERNAL_SKILL_PATTERN, { dot: true, scope: "global" })
+      plainMatches.push(...(yield* collect(root, EXTERNAL_SKILL_PATTERN, { dot: true, scope: "global" })))
     }
 
     const upDirs = yield* fsys
@@ -198,13 +215,15 @@ const discoverSkills = Effect.fnUntraced(function* (
       .pipe(Effect.catch(() => Effect.succeed([] as string[])))
 
     for (const root of upDirs) {
-      yield* scan(state, root, EXTERNAL_SKILL_PATTERN, { dot: true, scope: "project" })
+      plainMatches.push(...(yield* collect(root, EXTERNAL_SKILL_PATTERN, { dot: true, scope: "project" })))
     }
   }
 
+  // opencode configDirs → layered (каждый dir = один слой с меткой project/global).
   const configDirs = yield* config.directories()
   for (const dir of configDirs) {
-    yield* scan(state, dir, OPENCODE_SKILL_PATTERN)
+    const matches = yield* collect(dir, OPENCODE_SKILL_PATTERN)
+    opencodeLayers.push({ layer: classifySkillLayer(dir, directory, worktree), matches })
   }
 
   const cfg = yield* config.get()
@@ -216,19 +235,20 @@ const discoverSkills = Effect.fnUntraced(function* (
       continue
     }
 
-    yield* scan(state, dir, SKILL_PATTERN)
+    plainMatches.push(...(yield* collect(dir, SKILL_PATTERN)))
   }
 
   for (const url of cfg.skills?.urls ?? []) {
     const pulledDirs = yield* discovery.pull(url)
     for (const dir of pulledDirs) {
-      yield* scan(state, dir, SKILL_PATTERN)
+      plainMatches.push(...(yield* collect(dir, SKILL_PATTERN)))
     }
   }
 
   return {
-    matches: Array.from(state.matches),
-    dirs: Array.from(state.dirs),
+    opencodeLayers,
+    plainMatches,
+    dirs: Array.from(dirs),
   }
 })
 
@@ -237,13 +257,45 @@ const loadSkills = Effect.fnUntraced(function* (
   discovered: DiscoveryState,
   events: EventV2Bridge.Service["Service"],
 ) {
-  yield* Effect.forEach(discovered.matches, (match) => add(state, match, events), {
+  // 1. opencode-configDir слои → parse → fold.
+  const opencodeLayers: ConfigMerge.LayerMap[] = []
+  for (const l of discovered.opencodeLayers) {
+    const map: Record<string, ConfigMerge.Definition> = {}
+    for (const match of l.matches) {
+      const def = yield* parseSkillFile(match, events)
+      if (def) map[def.frontmatter.name as string] = def
+    }
+    if (Object.keys(map).length) opencodeLayers.push({ layer: l.layer, map })
+  }
+  const folded = ConfigMerge.foldEntries(opencodeLayers)
+  for (const [name, c] of Object.entries(folded)) {
+    state.skills[name] = {
+      name,
+      description: typeof c.frontmatter.description === "string" ? c.frontmatter.description : undefined,
+      location: c.source,
+      content: c.body,
+    }
+    for (const w of c.warnings) {
+      yield* Effect.logWarning(`layered merge skill "${name}": ${w.message}`, { source: c.source, kind: w.kind })
+    }
+  }
+
+  // 2. plain-источники поверх склеенных opencode-слоёв (last-write-wins).
+  yield* Effect.forEach(discovered.plainMatches, (match) => addPlain(state, match, events), {
     concurrency: "unbounded",
     discard: true,
   })
 
   yield* Effect.logInfo("init", { count: Object.keys(state.skills).length })
 })
+
+export interface Interface {
+  readonly get: (name: string) => Effect.Effect<Info | undefined>
+  readonly require: (name: string) => Effect.Effect<Info, NotFoundError>
+  readonly all: () => Effect.Effect<Info[]>
+  readonly dirs: () => Effect.Effect<string[]>
+  readonly available: (agent?: Agent.Info) => Effect.Effect<Info[]>
+}
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Skill") {}
 
@@ -263,6 +315,7 @@ const layer = Layer.effect(
           discovery,
           fsys,
           global,
+          events,
           flags.disableExternalSkills,
           flags.disableClaudeCodeSkills,
           ctx.directory,

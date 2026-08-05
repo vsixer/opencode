@@ -3,6 +3,7 @@ export * as ConfigAgentV1 from "./agent"
 import { Schema, SchemaGetter } from "effect"
 import { PositiveInt } from "../../schema"
 import { ConfigPermissionV1 } from "./permission"
+import { ConfigMergeV1 } from "./merge"
 
 const Color = Schema.Union([
   Schema.String.check(Schema.isPattern(/^#[0-9a-fA-F]{6}$/)),
@@ -36,6 +37,10 @@ const AgentSchema = Schema.StructWithRest(
     }),
     maxSteps: Schema.optional(PositiveInt).annotate({ description: "@deprecated Use 'steps' field instead." }),
     permission: Schema.optional(ConfigPermissionV1.Info),
+    merge: Schema.optional(ConfigMergeV1.Strategy).annotate({
+      description:
+        "How to compose this agent with a same-named global one: append (default), prepend, or replace",
+    }),
   }),
   [Schema.Record(Schema.String, Schema.Any)],
 )
@@ -57,6 +62,7 @@ const KNOWN_KEYS = new Set([
   "permission",
   "disable",
   "tools",
+  "merge",
 ])
 
 const normalize = (agent: Schema.Schema.Type<typeof AgentSchema>): Schema.Schema.Type<typeof AgentSchema> => {

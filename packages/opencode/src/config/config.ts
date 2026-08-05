@@ -23,12 +23,15 @@ import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/unstable/
 import { EffectFlock } from "@opencode-ai/core/util/effect-flock"
 import { containsPath, type InstanceContext } from "../project/instance-context"
 import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
+import { ConfigAgentV1 } from "@opencode-ai/core/v1/config/agent"
+import { ConfigCommandV1 } from "@opencode-ai/core/v1/config/command"
 import { RemoteAuthError } from "@opencode-ai/core/v1/config/error"
 import { ConfigPermissionV1 } from "@opencode-ai/core/v1/config/permission"
 import { ConfigPluginV1 } from "@opencode-ai/core/v1/config/plugin"
 import { ConfigAgent } from "./agent"
 import { ConfigCommand } from "./command"
 import { ConfigManaged } from "./managed"
+import { ConfigMerge } from "./merge"
 import { ConfigParse } from "./parse"
 import { ConfigPaths } from "./paths"
 import { ConfigPlugin } from "./plugin"
@@ -48,6 +51,26 @@ function mergeConfigConcatArrays(target: Info, source: Info): Info {
     merged.instructions = Array.from(new Set([...target.instructions, ...source.instructions]))
   }
   return merged
+}
+
+// Финальный decode после слоистого fold: каждое Composed → типизированное Info.
+// body-field зависит от типа (template для команд, prompt для агентов/режимов).
+// withName: agent/mode сохраняют name как top-level поле (через rest-pocket);
+//   command — нет, его схема строгая (Schema.Struct без rest) и тесты проверяют точное равенство.
+// async: ConfigParse.schema бросает sync — async-обёртка превращает бросок в rejected promise,
+// который Effect.promise пробрасывает как fail с исходным InvalidError.
+async function decodeEntries<T>(
+  composed: Record<string, ConfigMerge.Composed>,
+  bodyField: "template" | "prompt",
+  withName: boolean,
+  decode: (data: unknown, source: string) => T,
+): Promise<Record<string, T>> {
+  const out: Record<string, T> = {}
+  for (const [name, c] of Object.entries(composed)) {
+    const data = { ...(withName ? { name } : {}), ...c.frontmatter, [bodyField]: c.body }
+    out[name] = decode(data, c.source || name)
+  }
+  return out
 }
 
 function normalizeLoadedConfig(data: unknown) {
@@ -421,6 +444,13 @@ const layer = Layer.effect(
 
         const deps: Fiber.Fiber<void>[] = []
 
+        const layered: {
+          layer: string
+          commands: Record<string, ConfigMerge.Definition>
+          agents: Record<string, ConfigMerge.Definition>
+          modes: Record<string, ConfigMerge.Definition>
+        }[] = []
+
         for (const dir of directories) {
           if (dir.endsWith(".opencode") || dir === Flag.OPENCODE_CONFIG_DIR) {
             for (const file of ["opencode.json", "opencode.jsonc"]) {
@@ -456,14 +486,72 @@ const layer = Layer.effect(
             )
           deps.push(dep)
 
-          result.command = mergeDeep(result.command ?? {}, yield* Effect.promise(() => ConfigCommand.load(dir)))
-          result.agent = mergeDeep(result.agent ?? {}, yield* Effect.promise(() => ConfigAgent.load(dir)))
-          result.agent = mergeDeep(result.agent ?? {}, yield* Effect.promise(() => ConfigAgent.loadMode(dir)))
+          const [commands, agents, modes] = yield* Effect.all([
+            Effect.promise(() => ConfigCommand.load(dir)),
+            Effect.promise(() => ConfigAgent.load(dir)),
+            Effect.promise(() => ConfigAgent.loadMode(dir)),
+          ])
+          // Слой "project" если dir в пределах workspace, иначе "global" (для provenance).
+          layered.push({ layer: containsPath(dir, ctx) ? "project" : "global", commands, agents, modes })
+
           // Auto-discovered plugins under `.opencode/plugin(s)` are already local files, so ConfigPlugin.load
           // returns normalized Specs and we only need to attach origin metadata here.
           const list = yield* Effect.promise(() => ConfigPlugin.load(dir))
           yield* mergePluginOrigins(dir, list)
         }
+
+        // Слоистое слияние command/agent/mode: fold по ordered layers, затем один decode над итогом.
+        const commandComposed = ConfigMerge.foldEntries(layered.map((l) => ({ layer: l.layer, map: l.commands })))
+        const agentComposed = ConfigMerge.foldEntries(layered.map((l) => ({ layer: l.layer, map: l.agents })))
+        const modeComposed = ConfigMerge.foldEntries(layered.map((l) => ({ layer: l.layer, map: l.modes })))
+
+        const logLayeredWarnings = (kind: string, composed: Record<string, ConfigMerge.Composed>) =>
+          Effect.forEach(
+            Object.entries(composed),
+            ([name, c]) =>
+              Effect.forEach(
+                c.warnings,
+                (w) =>
+                  Effect.logWarning(`layered merge ${kind} "${name}": ${w.message}`, {
+                    source: c.source,
+                    kind: w.kind,
+                  }),
+                { discard: true },
+              ),
+            { discard: true },
+          )
+        yield* logLayeredWarnings("command", commandComposed)
+        yield* logLayeredWarnings("agent", agentComposed)
+        yield* logLayeredWarnings("mode", modeComposed)
+
+        const foldedCommands = yield* Effect.promise(() =>
+          decodeEntries(commandComposed, "template", false, (data, source) =>
+            // command frontmatter исторически пропускает extra-keys (reasoningEffort и др.) молча;
+            // используем lenient-decode, а не строгий ConfigParse.schema с extra-key проверкой.
+            ConfigParse.decode(ConfigCommandV1.Info, data, source),
+          ),
+        )
+        const foldedAgents = yield* Effect.promise(() =>
+          decodeEntries(
+            agentComposed,
+            "prompt",
+            true,
+            (data, source) => ConfigParse.schema(ConfigAgentV1.Info, data, source),
+          ),
+        )
+        const foldedModes = yield* Effect.promise(() =>
+          decodeEntries(
+            modeComposed,
+            "prompt",
+            true,
+            (data, source) => ConfigParse.schema(ConfigAgentV1.Info, data, source),
+          ),
+        )
+
+        // command/agent/mode из opencode.json служат базой поверх folded .md-определений.
+        result.command = mergeDeep(result.command ?? {}, foldedCommands)
+        result.agent = mergeDeep(result.agent ?? {}, foldedAgents)
+        result.mode = mergeDeep(result.mode ?? {}, foldedModes)
 
         if (process.env.OPENCODE_CONFIG_CONTENT) {
           const source = "OPENCODE_CONFIG_CONTENT"
