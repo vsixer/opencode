@@ -15,6 +15,7 @@ import {
   useContext,
 } from "solid-js"
 import { Dynamic } from "solid-js/web"
+import { createStore } from "solid-js/store"
 import path from "node:path"
 import { mkdir, writeFile } from "node:fs/promises"
 import { useRoute, useRouteData } from "../../context/route"
@@ -179,6 +180,12 @@ function use() {
   return ctx
 }
 
+// Накопленная пауза хода на время ожидающих вопросов агента. Ключ — id
+// user-сообщения (общий parentID для всех assistant-сообщений хода), чтобы
+// пауза переживала дробление хода на отдельные сообщения при tool-call'ах.
+const [turnPause, setTurnPause] = createStore<Record<string, number>>({})
+const pauseStartByTurn = new Map<string, number>()
+
 export function Session() {
   const setEpilogue = useEpilogue()
   const clipboard = useClipboard()
@@ -244,6 +251,25 @@ export function Session() {
   })
   const visible = createMemo(() => !session()?.parentID && permissions().length === 0 && questions().length === 0)
   const disabled = createMemo(() => permissions().length > 0 || questions().length > 0)
+
+  // Пока висит вопрос пользователя, активный ход «на паузе»: запоминаем начало
+  // паузы, а когда ответ получен — добавляем отрезок к накопленной паузе хода.
+  // Активный ход — последнее user-сообщение (его id = parentID всех assistant-
+  // сообщений хода).
+  createEffect(() => {
+    const hasQuestion = questions().length > 0
+    const turnID = messages().findLast((x) => x.role === "user")?.id
+    if (!turnID) return
+    if (hasQuestion) {
+      if (!pauseStartByTurn.has(turnID)) pauseStartByTurn.set(turnID, Date.now())
+    } else {
+      const start = pauseStartByTurn.get(turnID)
+      if (start !== undefined) {
+        setTurnPause(turnID, (p) => (p ?? 0) + (Date.now() - start))
+        pauseStartByTurn.delete(turnID)
+      }
+    }
+  })
 
   const pending = createMemo(() => {
     const completed = messages().findLastIndex((message) => message.role === "assistant" && message.time.completed)
@@ -1493,12 +1519,27 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
     return props.message.finish && !["tool-calls", "unknown"].includes(props.message.finish)
   })
 
+  // Сервер не шлёт секундных обновлений во время стрима, поэтому elapsed хода
+  // тикает локально, пока сообщение не получит time.completed.
+  const [now, setNow] = createSignal(Date.now())
+  createEffect(() => {
+    if (props.message.time.completed !== undefined) return
+    const id = setInterval(() => setNow(Date.now()), 1000)
+    onCleanup(() => clearInterval(id))
+  })
+
   const duration = createMemo(() => {
-    if (!final()) return 0
-    if (!props.message.time.completed) return 0
     const user = messages().find((x) => x.role === "user" && x.id === props.message.parentID)
     if (!user || !user.time) return 0
-    return props.message.time.completed - user.time.created
+    // Пауза хода — общая для всех assistant-сообщений (см. накопление в Session):
+    // накопленное значение + текущий открытый отрезок ожидания. На время вопроса
+    // elapsed и пауза растут синхронно, поэтому отображаемое значение зафиксировано;
+    // после ответа накопленная пауза вычитается бесшовно — без скачка.
+    const start = pauseStartByTurn.get(props.message.parentID)
+    const pause = (turnPause[props.message.parentID] ?? 0) + (start !== undefined ? Date.now() - start : 0)
+    if (props.message.time.completed === undefined) return now() - user.time.created - pause
+    if (!final()) return 0
+    return props.message.time.completed - user.time.created - (turnPause[props.message.parentID] ?? 0)
   })
 
   const childShortcut = useCommandShortcut("session.child.first")

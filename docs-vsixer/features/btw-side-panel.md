@@ -59,6 +59,7 @@
 - В шапке справа при `busy` появляется `⟳ Ns` (цвет `theme.primary`) — секунды с момента старта хода. Видно всегда, даже если прокрутили сообщения вверх.
 - Спинсер у хвоста сообщений тоже показывает elapsed: `thinking… 3s`.
 - `createEffect` на `busy()` тикает раз в секунду, чистится через `onCleanup`.
+- Тот же приём зеркалится в **основную сессию**: `AssistantMessage` в `packages/tui/src/routes/session/index.tsx` ведёт локальный секундный тикер, пока у сообщения не установлен `time.completed`, и показывает `· Ns` в футере сообщения рядом с моделью (`now() - user.time.created`). После завершения значение фиксируется по `time.completed`; промежуточные tool-call-сообщения время не показывают. На время ожидающего вопроса агента таймер **замораживается**: длительность паузы накапливается и вычитается из elapsed, поэтому ожидание ответа не учитывается ни в живом значении, ни в финальном. Пауза — **общая для всего хода** (ключ — id user-сообщения, общий `parentID` всех assistant-сообщений хода), хранится на уровне модуля и наполняется эффектом в `Session`; это принципиально, т.к. ход дробится на отдельные assistant-сообщения при каждом tool-call, и покомпонентная пауза терялась при появлении нового сообщения (наблюдался скачок таймера на полный wall-clock). На время вопроса `now()` и накопленная пауза растут синхронно, поэтому отображаемое значение «замёрзло», а после ответа пауза вычитается бесшовно — без скачка.
 
 ### Подсветка синтаксиса (как в основной сессии)
 
@@ -100,7 +101,7 @@ btw — **полностью fork-фича**, в `anomalyco/opencode` её не�
 | Файл | Изменение |
 |---|---|
 | `packages/tui/src/app.tsx` | + обёртка `BtwProvider`; переписана команда `session.btw` (cycle); добавлена `session.btw.close`; эффект закрытия btw при смене сессии. |
-| `packages/tui/src/routes/session/index.tsx` | + `useBtw()`, memos `btwActiveHere`/`btwWidth`, override `sidebarVisible`, `contentWidth` учитывает панель, рендер `<BtwPanel/>`, `<Prompt yieldFocus={btwActiveHere()}/>`, `"session.btw.close"` в `sessionBindingCommands`. |
+| `packages/tui/src/routes/session/index.tsx` | + `useBtw()`, memos `btwActiveHere`/`btwWidth`, override `sidebarVisible`, `contentWidth` учитывает панель, рендер `<BtwPanel/>`, `<Prompt yieldFocus={btwActiveHere()}/>`, `"session.btw.close"` в `sessionBindingCommands`; + живой таймер elapsed хода в футере `AssistantMessage`. |
 | `packages/tui/src/component/prompt/index.tsx` | + prop `yieldFocus` + ветка в автофокус-эффекте. |
 | `packages/tui/src/config/keybind.ts` | + `session_btw_close: <leader>p` + `CommandMap.session_btw_close`. |
 | `packages/tui/src/ui/dialog.tsx` | удалён btw-only `setOnEscape`/`onEscape` (чистка после ухода от модалки). |
