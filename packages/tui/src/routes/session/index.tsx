@@ -54,6 +54,8 @@ import { DialogTimeline } from "./dialog-timeline"
 import { DialogForkFromTimeline } from "./dialog-fork-from-timeline"
 import { DialogSessionRename } from "../../component/dialog-session-rename"
 import { Sidebar } from "./sidebar"
+import { BtwPanel } from "./panel-btw"
+import { useBtw } from "../../context/btw"
 import { SubagentFooter } from "./subagent-footer.tsx"
 import { filetype } from "../../util/filetype"
 import parsers from "../../parsers-config"
@@ -120,6 +122,7 @@ const sessionBindingCommands = [
   "session.fork",
   "session.compact",
   "session.btw",
+  "session.btw.close",
   "session.unshare",
   "session.undo",
   "session.redo",
@@ -262,14 +265,20 @@ export function Session() {
   const [showGenericToolOutput, setShowGenericToolOutput] = kv.signal("generic_tool_output_visibility", false)
 
   const wide = createMemo(() => dimensions().width > 120)
+  // useBtw обязан быть ДО btwActiveHere: createMemo выполняется eagerly, и ссылка
+  // на ещё не инициализированный const даёт TDZ «Cannot access X before initialization».
+  const btw = useBtw()
+  const btwActiveHere = createMemo(() => btw.state()?.parentID === route.sessionID)
+  const btwWidth = createMemo(() => (btwActiveHere() ? Math.floor(dimensions().width / 2) : 0))
   const sidebarVisible = createMemo(() => {
+    if (btwActiveHere()) return false
     if (session()?.parentID) return false
     if (sidebarOpen()) return true
     if (sidebar() === "auto" && wide()) return true
     return false
   })
   const showTimestamps = createMemo(() => timestamps() === "show")
-  const contentWidth = createMemo(() => dimensions().width - (sidebarVisible() ? 42 : 0) - 4)
+  const contentWidth = createMemo(() => dimensions().width - (sidebarVisible() ? 42 : 0) - btwWidth() - 4)
   const providers = createMemo(() => Model.index(sync.data.provider))
 
   const scrollAcceleration = createMemo(() => getScrollAcceleration(tuiConfig))
@@ -1310,6 +1319,7 @@ export function Session() {
                       visible={visible()}
                       ref={bind}
                       disabled={disabled()}
+                      yieldFocus={btwActiveHere()}
                       onSubmit={() => {
                         toBottom()
                       }}
@@ -1322,6 +1332,9 @@ export function Session() {
             </Show>
             <Toast />
           </box>
+          <Show when={btwActiveHere()}>
+            <BtwPanel parentID={route.sessionID} width={btwWidth()} />
+          </Show>
           <Show when={sidebarVisible()}>
             <Switch>
               <Match when={wide()}>

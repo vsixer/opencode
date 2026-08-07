@@ -71,10 +71,6 @@ function init() {
     stack: [] as {
       element: JSX.Element
       onClose?: () => void
-      // Опциональный собственный обработчик escape для диалогов, которым нужна
-      // не-дефолтная семантика (btw: double-escape для abort/close). Если задан,
-      // generic-обработчик escape делегирует ему и не делает свой close.
-      onEscape?: () => void
     }[],
     size: "medium" as "medium" | "large" | "xlarge",
   })
@@ -119,11 +115,6 @@ function init() {
         group: "Dialog",
         cmd: () => {
           const current = store.stack.at(-1)
-          // Диалог с собственным onEscape (btw) полностью владеет поведением.
-          if (current?.onEscape) {
-            current.onEscape()
-            return
-          }
           // Первый esc снимает выделение и НЕ закрывает; следующий закрывает.
           if (renderer.getSelection()) {
             renderer.clearSelection()
@@ -177,13 +168,6 @@ function init() {
           onClose,
         },
       ])
-    },
-    // Позволяет отрисованному диалогу (btw) назначить собственный escape-обработчик
-    // поверх дефолтного «single-esc → close». Вызывается в onMount, снимается в
-    // onCleanup. Таргетится на верхний элемент стека.
-    setOnEscape(handler: (() => void) | undefined) {
-      if (store.stack.length === 0) return
-      setStore("stack", store.stack.length - 1, "onEscape", handler)
     },
     get stack() {
       return store.stack
