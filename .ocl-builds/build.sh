@@ -23,12 +23,18 @@ Usage: ocl-build [prod|dev|all]
 EOF
 }
 
-# Версию фиксируем явно из packages/opencode/package.json, иначе для канала
-# latest сборщик лезет в npm-registry и бампит версию, а для preview каналов
-# ставит 0.0.0-<channel>-<ts> — и то и другое бесполезно для локального форка.
-pkg_version() {
-  node -p "require('$PKG/package.json').version" 2>/dev/null \
-    || bun -e "console.log((await Bun.file('$PKG/package.json').json()).version)"
+# Версию берём как актуальный latest из npm-registry и добавляем суффикс форка.
+# +vsixer — это semver build-metadata: виден в --version, но не ломает
+# semver.satisfies для плагинов и не вызывает фолс-наг об обновлении
+# (в отличие от prerelease -vsixer). В офлайне откатываемся на package.json.
+fork_version() {
+  local base
+  base="$(node -e "fetch('https://registry.npmjs.org/opencode-ai/latest').then(r=>r.json()).then(d=>process.stdout.write(d.version)).catch(()=>process.exit(1))" 2>/dev/null)"
+  if [[ -z "$base" ]]; then
+    echo "npm registry недоступен — fallback на package.json" >&2
+    base="$(node -p "require('$PKG/package.json').version" 2>/dev/null)"
+  fi
+  printf '%s\n' "${base}+vsixer"
 }
 
 # Сборка одной платформой (--single) создаёт dist/opencode-{os}-{arch}/bin/opencode.
@@ -43,8 +49,7 @@ find_binary() {
 }
 
 build_channel() {
-  local channel="$1" dest="$2" version
-  version="$(pkg_version)"
+  local channel="$1" dest="$2" version="$3"
   echo "==> Сборка канала '$channel' (версия $version) → $dest"
   rm -rf "$PKG/dist"
   (cd "$PKG" && OPENCODE_CHANNEL="$channel" OPENCODE_VERSION="$version" bun run script/build.ts --single)
@@ -57,12 +62,15 @@ build_channel() {
 }
 
 main() {
+  local version
+  version="$(fork_version)"
+  echo "Версия сборки: $version"
   case "${1:-all}" in
-    prod) build_channel latest "$OUT/prod" ;;
-    dev)  build_channel dev    "$OUT/dev"  ;;
+    prod) build_channel latest "$OUT/prod" "$version" ;;
+    dev)  build_channel dev    "$OUT/dev"  "$version" ;;
     all)
-      build_channel latest "$OUT/prod"
-      build_channel dev    "$OUT/dev"
+      build_channel latest "$OUT/prod" "$version"
+      build_channel dev    "$OUT/dev"  "$version"
       ;;
     -h|--help|help) usage ;;
     *) echo "Неизвестный аргумент: $1" >&2; usage; exit 1 ;;

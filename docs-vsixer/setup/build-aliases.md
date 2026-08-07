@@ -25,6 +25,18 @@ ocl-build
 
 Both binaries update in place. Aliases do not need to change. Takes ~2–3 minutes.
 
+## Version scheme
+
+The baked-in version is **npm `opencode-ai@latest` + `+vsixer`** (e.g. `1.18.15+vsixer`), derived in `build.sh` via `fork_version()`. This differs from the upstream builder, which for the `latest` channel fetches npm latest and bumps `patch + 1` (`packages/script/src/index.ts`).
+
+Why `+vsixer` (semver build metadata) and not `-vsixer` (prerelease):
+
+- `+vsixer` keeps `semver.satisfies` returning `true` for caret ranges, so plugin compatibility checks (`checkPluginCompatibility`) still pass.
+- `1.18.15+vsixer` compares **equal** to `1.18.15` in semver — no false «update available» notification.
+- `-vsixer` (prerelease) compares **lower** than `1.18.15`, which breaks both behaviors.
+
+Offline fallback: if the npm registry is unreachable, the version falls back to `packages/opencode/package.json` version + `+vsixer`.
+
 ## Channel → database mapping (why two databases exist)
 
 The channel is baked into the binary at build time via the `OPENCODE_CHANNEL` define (`packages/opencode/script/build.ts:198`). At runtime `packages/core/src/database/database.ts:43-55` picks the database file:

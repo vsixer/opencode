@@ -6,6 +6,14 @@ Entries: newest first. Format: `YYYY-MM-DD — <feature>` with a link to `featur
 
 ---
 
+## 2026-08-07 — Version scheme for local builds
+
+Local builds (`ocl-build`) now report the **actual npm `opencode-ai@latest` version with a `+vsixer` suffix** (e.g. `1.18.15+vsixer`) instead of the `package.json` version that drifted relative to the registry. The `+vsixer` suffix is semver build metadata: it stays visible in `--version`, but `semver.satisfies` still treats the version as equal to the release, so plugin compatibility checks (`checkPluginCompatibility`) keep working and there is no false «update available» notification. Offline fallback: `package.json` version + `+vsixer`.
+
+Change is confined to `.ocl-builds/build.sh` (fork-owned). Upstream versioning logic in `packages/script/src/index.ts` is untouched — no `git merge upstream/dev` conflict surface.
+
+Docs: [`setup/build-aliases.md`](setup/build-aliases.md).
+
 ## 2026-08-07 — BTW side panel
 
 Branch: `btw-side-panel`.
