@@ -48,7 +48,7 @@ type BtwMessage =
 export function BtwPanel(props: { parentID: string; width: number }) {
   const sdk = useSDK()
   const btw = useBtw()
-  const { theme } = useTheme()
+  const { theme, syntax, subtleSyntax } = useTheme()
   const renderer = useRenderer()
   const tuiConfig = useTuiConfig()
   const closeShortcut = useCommandShortcut("session.btw.close")
@@ -359,13 +359,30 @@ export function BtwPanel(props: { parentID: string; width: number }) {
                       : ` (${(msg as { reasoning: string }).reasoning.length} chars)`}
                   </text>
                   <Show when={expandedThinking().has(msg.id)}>
-                    <text fg={theme.textMuted}>{(msg as { reasoning: string }).reasoning}</text>
+                    <code
+                      filetype="markdown"
+                      streaming={true}
+                      syntaxStyle={subtleSyntax()}
+                      content={(msg as { reasoning: string }).reasoning}
+                      fg={theme.textMuted}
+                    />
                   </Show>
                 </Show>
-                <text fg={msg.role === "user" ? theme.text : theme.text}>
-                  {msg.role === "user" ? "you: " : "btw: "}
-                  {msg.text}
-                </text>
+                <Show when={msg.role === "user"}>
+                  <text fg={theme.text}>you: {msg.text}</text>
+                </Show>
+                <Show when={msg.role === "assistant" && msg.text}>
+                  <text fg={theme.textMuted}>btw</text>
+                  <markdown
+                    syntaxStyle={syntax()}
+                    streaming={true}
+                    internalBlockMode="top-level"
+                    content={msg.text}
+                    tableOptions={{ style: "grid" }}
+                    fg={theme.markdownText}
+                    bg={theme.background}
+                  />
+                </Show>
                 <Show when={msg.role === "assistant" && msg.tools.length > 0}>
                   <For each={(msg as { tools: ToolEntry[] }).tools}>
                     {(t) => (
