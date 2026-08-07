@@ -6,6 +6,16 @@ Entries: newest first. Format: `YYYY-MM-DD — <feature>` with a link to `featur
 
 ---
 
+## 2026-08-07 — BTW side panel
+
+Branch: `btw-side-panel`.
+
+`/btw` теперь открывает эфемерный side-chat в **боковой панели** (рабочая область делится 50/50 по горизонтали), а не в блокирующей модалке. Основная сессия остаётся интерактивной — две сессии работают параллельно. Включает: cycle фокуса (`<leader>b`), закрытие (`<leader>p`), прерывание хода (зеркалирует `session.interrupt` из `tui.jsonc`), сворачиваемые thinking-блоки, индикатор выполнения (таймер тура), подсветку синтаксиса через `<markdown>`/`<code>` как в основной сессии. Серверная часть `session/btw` in-memory, без персистенции; сбрасывается при смене сессии.
+
+Расхождение с upstream: btw — полностью fork-фича (upstream не имеет `/btw`); затронуты upstream-owned TUI-файлы (`app.tsx`, `routes/session/index.tsx`, `component/prompt/index.tsx`, `config/keybind.ts`, `ui/dialog.tsx`) — это конфликт-поверхность при `git merge upstream/dev`.
+
+Docs: [`features/btw-side-panel.md`](features/btw-side-panel.md).
+
 ## 2026-08-05 — Layered merge for commands/agents/skills
 
 Branch: `global-local-merge`.
