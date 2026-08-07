@@ -103,17 +103,23 @@ function init() {
   }
 
   useBindings(() => ({
-    enabled: store.stack.length > 0 && !renderer.getSelection()?.getSelectedText(),
+    // Раньше здесь было `&& !renderer.getSelection()?.getSelectedText()`: при
+    // залипшем selection обработчик, который сам же чистит выделение, не вызывался
+    // — замыкание ловушки. Теперь обработчик всегда активен, а очистка выделения
+    // делается первым esc внутри cmd.
+    enabled: store.stack.length > 0,
     bindings: [
       {
         key: "escape",
         desc: "Close dialog",
         group: "Dialog",
         cmd: () => {
+          const current = store.stack.at(-1)
+          // Первый esc снимает выделение и НЕ закрывает; следующий закрывает.
           if (renderer.getSelection()) {
             renderer.clearSelection()
+            return
           }
-          const current = store.stack.at(-1)
           current?.onClose?.()
           setStore("stack", store.stack.slice(0, -1))
           refocus()

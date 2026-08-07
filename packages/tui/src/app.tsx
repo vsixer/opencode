@@ -65,6 +65,7 @@ import * as Model from "./util/model"
 import { ArgsProvider, useArgs, type Args } from "./context/args"
 import open from "open"
 import { PromptRefProvider, usePromptRef } from "./context/prompt"
+import { BtwProvider, useBtw } from "./context/btw"
 import { TuiConfigProvider, useTuiConfig, type TuiConfig } from "./config"
 import { createTuiApiAdapters } from "./plugin/adapters"
 import { createTuiApi } from "./plugin/api"
@@ -309,6 +310,7 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
                                                   <ThemeProvider mode={mode}>
                                                     <LocalProvider>
                                                       <PromptStashProvider>
+                                                      <BtwProvider>
                                                         <DialogProvider>
                                                           <FrecencyProvider>
                                                             <PromptHistoryProvider>
@@ -325,6 +327,7 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
                                                             </PromptHistoryProvider>
                                                           </FrecencyProvider>
                                                         </DialogProvider>
+                                                      </BtwProvider>
                                                       </PromptStashProvider>
                                                     </LocalProvider>
                                                   </ThemeProvider>
@@ -381,9 +384,22 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
   const project = useProject()
   const exit = useExit()
   const promptRef = usePromptRef()
+  const btw = useBtw()
   const pluginRuntime = usePluginRuntime()
   const attention = createTuiAttention({ renderer, config: tuiConfig, kv })
   const clipboard = useClipboard()
+
+  // При смене сессии гасим btw. Этот эффект живёт в здоровом owner'е (App), а не
+  // в disposal-цикле Session, поэтому запись сигнала безопасна: подписчики из
+  // размонтиируемой Session пропускаются Solid'ом. Раньше close висел в onCleanup
+  // самой Session — запись ancestor-сигнала во время disposal рвала реактивную
+  // очередь (краш «Cannot access X before initialization» при навигации).
+  createEffect(
+    on(
+      () => (route.data.type === "session" ? route.data.sessionID : null),
+      () => btw.close(),
+    ),
+  )
 
   const api = createTuiApi(
     createTuiApiAdapters({
@@ -590,6 +606,35 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
             type: "home",
           })
           dialog.clear()
+        },
+      },
+      {
+        name: "session.btw",
+        title: "Open btw side chat",
+        suggested: route.data.type === "session",
+        category: "Session",
+        slashName: "btw",
+        run: () => {
+          const data = route.data
+          if (data.type !== "session") return
+          // Cycle: закрыто → открыть+фокус на btw; btw в фокусе → фокус на основную;
+          // основная в фокусе → фокус на btw. Закрытие — отдельная команда (session.btw.close).
+          const st = btw.state()
+          if (!st || st.parentID !== data.sessionID) {
+            btw.open(data.sessionID)
+            return
+          }
+          const r = btw.ref()
+          if (r?.focused()) promptRef.current?.focus()
+          else r?.focus()
+        },
+      },
+      {
+        name: "session.btw.close",
+        title: "Close btw side panel",
+        category: "Session",
+        run: () => {
+          btw.close()
         },
       },
       {
@@ -980,6 +1025,24 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
       return current.current.input === ""
     },
     bindings: tuiConfig.keybinds.gather("app_exit", ["app.exit"]),
+  }))
+
+  // Escape-hatch: в modal-режиме app.exit (base-only) мёртв, а диалог перехватывает
+  // ctrl+c на закрытие. ctrl+d даёт гарантированный выход даже из зависшей модалки:
+  // сначала чистим стек (onCleanup btw прервёт тур и снимет busy), затем штатный exit.
+  useBindings(() => ({
+    mode: "modal",
+    bindings: [
+      {
+        key: "ctrl+d",
+        desc: "Exit (closes dialog first)",
+        group: "App",
+        cmd: () => {
+          dialog.clear()
+          exit()
+        },
+      },
+    ],
   }))
 
   event.on("tui.command.execute", (evt, { workspace }) => {

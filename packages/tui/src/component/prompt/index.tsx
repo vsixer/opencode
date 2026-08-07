@@ -73,6 +73,10 @@ export type PromptProps = {
     normal?: string[]
     shell?: string[]
   }
+  // True, пока боковая панель (btw) претендует на фокус по умолчанию. Эффект
+  // автофокуса промпта в этом режиме не забирает фокус сам, но и не снимает
+  // его, если поле получено явно (цикл фокуса / клик).
+  yieldFocus?: boolean
 }
 
 function pastedFilepath(value: string, platform: string) {
@@ -637,6 +641,10 @@ export function Prompt(props: PromptProps) {
       if (input.focused) input.blur()
       return
     }
+
+    // Боковая панель (btw) владеет фокусом по умолчанию — не грэббим фокус сами,
+    // но и не blur'им, чтобы явный фокус/клик по этому промпту удерживался.
+    if (props.yieldFocus) return
 
     // Slot/plugin updates can remount the background prompt while a dialog is open.
     // Keep focus with the dialog and let the prompt reclaim it after the dialog closes.
