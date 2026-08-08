@@ -6,6 +6,14 @@ Entries: newest first. Format: `YYYY-MM-DD — <feature>` with a link to `featur
 
 ---
 
+## 2026-08-08 — materialize-attachment tool
+
+New custom tool `materialize-attachment` that turns an inline pasted/attached image (or PDF/SVG) into a real file path and returns it. This lets non-vision models (e.g. `glm-5.2`) recover from a «model does not support image input» error by routing the path to a vision tool (`zai-mcp-server_extract_text_from_screenshot`, `zai-mcp-server_analyze_image`, …). Reads the latest user attachment's `file` part read-only from the local SQLite projection (channel-agnostic — scans all `opencode*.db`), preferring the original `source.path` if the file still exists on disk, otherwise decoding the inline `data:` URL to `/tmp/opencode/attachments/<sha1>.<ext>`. Uses `bun:sqlite` only — no network port, no `@opencode-ai/opencode` import — so it works in every run mode (TUI/CLI/ACP).
+
+Fork-safe: confined to `.opencode/tool/materialize-attachment.ts` + `.opencode/opencode.jsonc`; no `packages/**` files touched — zero `git merge upstream/dev` conflict surface.
+
+Docs: [`features/materialize-attachment.md`](features/materialize-attachment.md).
+
 ## 2026-08-07 — Version scheme for local builds
 
 Local builds (`ocl-build`) now report the **actual npm `opencode-ai@latest` version with a `+vsixer` suffix** (e.g. `1.18.15+vsixer`) instead of the `package.json` version that drifted relative to the registry. The `+vsixer` suffix is semver build metadata: it stays visible in `--version`, but `semver.satisfies` still treats the version as equal to the release, so plugin compatibility checks (`checkPluginCompatibility`) keep working and there is no false «update available» notification. Offline fallback: `package.json` version + `+vsixer`.

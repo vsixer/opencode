@@ -26,6 +26,7 @@ If a fork change requires modifying an upstream file, record the deviation in th
 ### Features
 - [`features/layered-merge.md`](features/layered-merge.md) — layered merge for commands/agents/skills (global + project definitions compose instead of replacing). Status: stable, 2026-08-05.
 - [`features/btw-side-panel.md`](features/btw-side-panel.md) — `/btw` as a side panel (50/50 split) instead of a blocking modal; ephemeral side-chat with focus cycle, collapsible thinking, progress indicator, and markdown syntax highlighting. Status: stable, 2026-08-07.
+- [`features/materialize-attachment.md`](features/materialize-attachment.md) — `materialize-attachment` tool: turns an inline pasted/attached image into a real file path so non-vision models can route it to vision tools (`zai-mcp-server_*`). Status: stable, 2026-08-08.
 
 ## Changelog
 
