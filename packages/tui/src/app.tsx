@@ -119,6 +119,7 @@ const appBindingCommands = [
   "variant.list",
   "provider.connect",
   "console.org.switch",
+  "app.reload",
   "opencode.status",
   "opencode.debug",
   "theme.switch",
@@ -805,6 +806,32 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
             },
           ]
         : []),
+      {
+        name: "app.reload",
+        title: "Reload configuration",
+        category: "App",
+        slashName: "reload",
+        run: async () => {
+          await sdk.client.config
+            .reload({ workspace: project.workspace.current() })
+            .then((result) => {
+              if (result.data?.immediate) sync.reload.start({ bootstrapCycle: result.data.bootstrapCycle })
+              toast.show({
+                message: result.data?.immediate
+                  ? "Reloading configuration"
+                  : "Reload will start after active sessions finish",
+                variant: "info",
+              })
+              dialog.clear()
+            })
+            .catch((error) => {
+              toast.show({
+                message: error instanceof Error ? error.message : "Failed to reload configuration",
+                variant: "error",
+              })
+            })
+        },
+      },
       {
         name: "opencode.status",
         title: "View status",

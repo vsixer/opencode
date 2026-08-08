@@ -1,6 +1,7 @@
 export * as EventManifest from "./event-manifest"
 
 import { Catalog } from "./catalog"
+import { ConfigReloadEvent } from "./config-reload-event"
 import { Durable } from "./durable-event-manifest"
 import { Event } from "./event"
 import { FileSystem } from "./filesystem"
@@ -52,6 +53,7 @@ const featureDefinitions = Event.inventory(
   ...FileSystemWatcher.Event.Definitions,
   ...Pty.Event.Definitions,
   ...Question.Event.Definitions,
+  ...ConfigReloadEvent.Definitions,
 )
 
 export const ServerDefinitions = Event.inventory(

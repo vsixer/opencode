@@ -13,6 +13,7 @@ import { Config } from "@/config/config"
 import { Plugin } from "@/plugin"
 import { Agent } from "@/agent/agent"
 import { InstanceState } from "@/effect/instance-state"
+import { ConfigReload } from "@/config/reload"
 
 import { ToolJsonSchema } from "@/tool/json-schema"
 import { MessageID, SessionID } from "@/session/schema"
@@ -50,10 +51,13 @@ const brokenPluginLayer = Layer.succeed(
   }),
 )
 
+const configReload = Layer.mock(ConfigReload.Service)({})
+
 const root = LayerNode.group([ToolRegistry.node, Agent.node])
 const replacements = [
   [Config.node, configLayer],
   [RuntimeFlags.node, RuntimeFlags.layer()],
+  [ConfigReload.node, configReload],
 ] as const
 
 const it = testEffect(LayerNode.compile(root, replacements))
@@ -61,6 +65,7 @@ const withCodeMode = testEffect(
   LayerNode.compile(root, [
     [Config.node, configLayer],
     [RuntimeFlags.node, RuntimeFlags.layer({ experimentalCodeMode: true })],
+    [ConfigReload.node, configReload],
     [
       MCP.node,
       Layer.mock(MCP.Service, {
@@ -84,6 +89,7 @@ const withEmptyCodeMode = testEffect(
   LayerNode.compile(root, [
     [Config.node, configLayer],
     [RuntimeFlags.node, RuntimeFlags.layer({ experimentalCodeMode: true })],
+    [ConfigReload.node, configReload],
     [
       MCP.node,
       Layer.mock(MCP.Service, {

@@ -9,6 +9,7 @@ import type { Permission } from "../../src/permission"
 import type { Tool } from "@/tool/tool"
 import { SkillTool } from "../../src/tool/skill"
 import { ToolRegistry } from "@/tool/registry"
+import { ConfigReload } from "@/config/reload"
 import { disposeAllInstances, TestInstance } from "../fixture/fixture"
 import { SessionID, MessageID } from "../../src/session/schema"
 import { testEffect } from "../lib/effect"
@@ -27,7 +28,13 @@ afterEach(async () => {
   await disposeAllInstances()
 })
 
-const it = testEffect(LayerNode.compile(LayerNode.group([ToolRegistry.node, CrossSpawnSpawner.node, Ripgrep.node])))
+const configReload = Layer.mock(ConfigReload.Service)({})
+
+const it = testEffect(
+  LayerNode.compile(LayerNode.group([ToolRegistry.node, CrossSpawnSpawner.node, Ripgrep.node]), [
+    [ConfigReload.node, configReload],
+  ]),
+)
 
 describe("tool.skill", () => {
   it.instance("execute returns skill content block with files", () =>

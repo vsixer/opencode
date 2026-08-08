@@ -6,6 +6,16 @@ Entries: newest first. Format: `YYYY-MM-DD — <feature>` with a link to `featur
 
 ---
 
+## 2026-08-08 — /reload hot config reload
+
+Slash-команда `/reload` и тул `reload_config` горячо перезагружают конфигурацию (`opencode.jsonc`, плагины, MCP-серверы, instance-scoped сервисы) без перезапуска TUI. Если есть активные сессии — релод ставится в очередь до idle, затем инстанс перезагружается через `InstanceStore.reload`, а TUI ре-синхронизируется (overlay + bootstrap-cycle handshake `POST /config/bootstrap-complete`). Состояние per-instance; повторные запросы коалясятся; overlay защищён fallback-таймаутом. Тул `reload_config` больше не инжектит синтетический continuation-prompt — durable-история остаётся чистой.
+
+Адаптация upstream PR [#9871](https://github.com/anomalyco/opencode/pull/9871) (issue #6719) под архитектуру форка: node-слои вместо `defaultLayer`, события `config.reload.*` вынесены в `packages/schema/src/config-reload-event.ts` и зарегистрированы в event-manifest (источник истины для OpenAPI/SDK), mock `ConfigReload` добавлен в 6 тестов из-за unbound-зависимости `InstanceBootstrap` в `InstanceStore.node`.
+
+Конфликтная поверхность: изменены upstream-owned файлы в `packages/opencode`, `packages/schema`, `packages/tui` + регенерирован SDK — потребуется сведение, если upstream смержит PR #9871.
+
+Docs: [`features/config-reload.md`](features/config-reload.md).
+
 ## 2026-08-08 — materialize-attachment tool
 
 New custom tool `materialize-attachment` that turns an inline pasted/attached image (or PDF/SVG) into a real file path and returns it. This lets non-vision models (e.g. `glm-5.2`) recover from a «model does not support image input» error by routing the path to a vision tool (`zai-mcp-server_extract_text_from_screenshot`, `zai-mcp-server_analyze_image`, …). Reads the latest user attachment's `file` part read-only from the local SQLite projection (channel-agnostic — scans all `opencode*.db`), preferring the original `source.path` if the file still exists on disk, otherwise decoding the inline `data:` URL to `/tmp/opencode/attachments/<sha1>.<ext>`. Uses `bun:sqlite` only — no network port, no `@opencode-ai/opencode` import — so it works in every run mode (TUI/CLI/ACP).

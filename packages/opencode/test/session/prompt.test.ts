@@ -14,6 +14,7 @@ import { Agent as AgentSvc } from "../../src/agent/agent"
 import { BackgroundJob } from "@/background/job"
 import { Command } from "../../src/command"
 import { Config } from "@/config/config"
+import { ConfigReload } from "@/config/reload"
 import { LSP } from "@/lsp/lsp"
 import { MCP } from "../../src/mcp"
 import { Permission } from "../../src/permission"
@@ -156,6 +157,13 @@ const lsp = Layer.succeed(
   }),
 )
 
+const configReload = Layer.mock(ConfigReload.Service)({
+  start: () => Effect.void,
+  finish: () => Effect.void,
+  check: () => Effect.void,
+})
+
+
 const processorCreateStarted: Array<() => void> = []
 const blockingProcessor = Layer.succeed(
   SessionProcessor.Service,
@@ -214,6 +222,7 @@ function makePrompt(input?: { mcpInstructions?: MCP.ServerInstructions[]; proces
     [LSP.node, lsp],
     [MCP.node, makeMcp(input?.mcpInstructions)],
     [RuntimeFlags.node, runtimeFlags],
+    [ConfigReload.node, configReload],
   ] as const
   if (input?.processor === "blocking") {
     return LayerNode.compile(promptRoot, [...replacements, [SessionProcessor.node, blockingProcessor]])
@@ -228,6 +237,7 @@ function makeHttp(input?: { mcpInstructions?: MCP.ServerInstructions[]; processo
     [LSP.node, lsp],
     [MCP.node, makeMcp(input?.mcpInstructions)],
     [RuntimeFlags.node, runtimeFlags],
+    [ConfigReload.node, configReload],
   ] as const
   if (input?.processor === "blocking") {
     return LayerNode.compile(root, [...replacements, [SessionProcessor.node, blockingProcessor]])

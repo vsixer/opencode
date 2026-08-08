@@ -8,6 +8,7 @@ import { Agent } from "../../src/agent/agent"
 import { BackgroundJob } from "@/background/job"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { Config } from "@/config/config"
+import { ConfigReload } from "@/config/reload"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { Ripgrep } from "@opencode-ai/core/ripgrep"
 import { Session } from "@/session/session"
@@ -34,6 +35,12 @@ const ref = {
   modelID: ModelV2.ID.make("test-model"),
 }
 
+const configReload = Layer.mock(ConfigReload.Service)({
+  start: () => Effect.void,
+  finish: () => Effect.void,
+  check: () => Effect.void,
+})
+
 const layer = (flags: Partial<RuntimeFlags.Info> = {}) =>
   LayerNode.compile(
     LayerNode.group([
@@ -52,7 +59,10 @@ const layer = (flags: Partial<RuntimeFlags.Info> = {}) =>
       RuntimeFlags.node,
       Ripgrep.node,
     ]),
-    [[RuntimeFlags.node, RuntimeFlags.layer(flags)]],
+    [
+      [RuntimeFlags.node, RuntimeFlags.layer(flags)],
+      [ConfigReload.node, configReload],
+    ],
   )
 
 const it = testEffect(layer())

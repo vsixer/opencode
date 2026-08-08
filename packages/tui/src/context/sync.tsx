@@ -38,6 +38,36 @@ const emptyConsoleState: ConsoleState = {
   switchableOrgCount: 0,
 }
 
+const BOOTSTRAP_REFRESH_TIMEOUT = 10_000
+const BOOTSTRAP_COMPLETE_TIMEOUT = 10_000
+const RELOAD_OVERLAY_FALLBACK_TIMEOUT = 20_000
+
+function settleBootstrapRefresh(label: string, promise: Promise<unknown>) {
+  return new Promise<void>((resolve) => {
+    let settled = false
+    const timeout = setTimeout(() => {
+      if (settled) return
+      settled = true
+      console.warn("tui bootstrap refresh timed out", { label })
+      resolve()
+    }, BOOTSTRAP_REFRESH_TIMEOUT)
+
+    promise
+      .catch((error) => {
+        console.warn("tui bootstrap refresh failed", {
+          label,
+          error: error instanceof Error ? error.message : String(error),
+        })
+      })
+      .finally(() => {
+        if (settled) return
+        settled = true
+        clearTimeout(timeout)
+        resolve()
+      })
+  })
+}
+
 function search<T>(items: T[], target: string, key: (item: T) => string) {
   let left = 0
   let right = items.length - 1
@@ -111,6 +141,9 @@ export const {
       }
       formatter: FormatterStatus[]
       vcs: VcsInfo | undefined
+      reloadPending: boolean
+      reloading: boolean
+      reloadResult: "success" | "uncertain" | undefined
     }>({
       provider_next: {
         all: [],
@@ -141,11 +174,17 @@ export const {
       mcp_resource: {},
       formatter: [],
       vcs: undefined,
+      reloadPending: false,
+      reloading: false,
+      reloadResult: undefined,
     })
 
     const event = useEvent()
     const project = useProject()
     const sdk = useSDK()
+    let bootstrapCycle = 0
+    let bootstrappedReloadCycle = 0
+    let reloadOverlayFallback: ReturnType<typeof setTimeout> | undefined
 
     const fullSyncedSessions = new Set<string>()
     const syncingSessions = new Map<string, Promise<void>>()
@@ -173,10 +212,144 @@ export const {
         .then((x) => (x.data ?? []).toSorted((a, b) => a.id.localeCompare(b.id)))
     }
 
+    async function completeBootstrap(input: { workspace: string | undefined; cycle: number }) {
+      if (input.cycle <= 0) return
+      const result = await Promise.race([
+        sdk.client.config.bootstrapComplete({
+          workspace: input.workspace,
+          cycle: String(input.cycle),
+        }),
+        new Promise<undefined>((resolve) => {
+          setTimeout(() => resolve(undefined), BOOTSTRAP_COMPLETE_TIMEOUT)
+        }),
+      ])
+      if (!result) {
+        console.warn("tui bootstrap completion timed out", { cycle: input.cycle })
+        if (!isActiveReloadCycle(input.cycle)) return
+        clearReloadOverlayFallback()
+        batch(() => {
+          setStore("reloadPending", false)
+          setStore("reloading", false)
+          setStore("reloadResult", "uncertain")
+        })
+        return
+      }
+      if (!result.data?.success) {
+        console.warn("tui bootstrap completion rejected", { cycle: input.cycle })
+        if (!isActiveReloadCycle(input.cycle)) return
+        clearReloadOverlayFallback()
+        batch(() => {
+          setStore("reloadPending", false)
+          setStore("reloading", false)
+          setStore("reloadResult", "uncertain")
+        })
+        return
+      }
+      if (!isActiveReloadCycle(input.cycle)) return
+
+      // The server also emits config.reload.done. This local clear is a safety
+      // net for missed SSE delivery after the server already accepted bootstrap.
+      clearReloadOverlayFallback()
+      batch(() => {
+        setStore("reloadPending", false)
+        setStore("reloading", false)
+        setStore("reloadResult", "success")
+      })
+    }
+
+    function clearReloadOverlayFallback() {
+      if (!reloadOverlayFallback) return
+      clearTimeout(reloadOverlayFallback)
+      reloadOverlayFallback = undefined
+    }
+
+    function scheduleReloadOverlayFallback(cycle: number) {
+      clearReloadOverlayFallback()
+      reloadOverlayFallback = setTimeout(() => {
+        if (!isActiveReloadCycle(cycle)) return
+        console.warn("tui reload overlay released by fallback", { cycle })
+        void completeBootstrap({ workspace: project.workspace.current(), cycle }).catch((error) => {
+          console.warn("tui bootstrap completion failed", {
+            cycle,
+            error: error instanceof Error ? error.message : String(error),
+          })
+          batch(() => {
+            setStore("reloadPending", false)
+            setStore("reloading", false)
+            setStore("reloadResult", "uncertain")
+          })
+        })
+      }, RELOAD_OVERLAY_FALLBACK_TIMEOUT)
+    }
+
+    function isActiveReloadCycle(cycle: number) {
+      return store.reloading && bootstrapCycle === cycle
+    }
+
+    function isCurrentReloadEvent(metadata: { directory: string; workspace: string | undefined }) {
+      const directory = project.instance.directory()
+      if (directory && metadata.directory && metadata.directory !== directory) return false
+      const workspace = project.workspace.current()
+      if (workspace && metadata.workspace && metadata.workspace !== workspace) return false
+      return true
+    }
+
+    function startReload(input: { bootstrapCycle?: number }) {
+      if (typeof input.bootstrapCycle !== "number") return
+      bootstrapCycle = input.bootstrapCycle
+      bootstrappedReloadCycle = 0
+      batch(() => {
+        setStore("reloadPending", false)
+        setStore("reloading", true)
+        setStore("reloadResult", undefined)
+      })
+      scheduleReloadOverlayFallback(input.bootstrapCycle)
+    }
+
+    function bootstrapReloadOnce() {
+      if (bootstrapCycle <= 0) return
+      if (bootstrappedReloadCycle === bootstrapCycle) return
+      bootstrappedReloadCycle = bootstrapCycle
+      void bootstrap({ fatal: false, cycle: bootstrapCycle })
+    }
+
     event.subscribe((event, { directory, workspace }) => {
       switch (event.type) {
+        case "server.connected":
+          if (!isCurrentReloadEvent({ directory, workspace })) break
+          if (store.reloading) bootstrapReloadOnce()
+          break
         case "server.instance.disposed":
-          void bootstrap()
+          if (!isCurrentReloadEvent({ directory, workspace })) break
+          if (store.reloading) bootstrapReloadOnce()
+          else void bootstrap()
+          break
+        case "config.reload.pending":
+          if (!isCurrentReloadEvent({ directory, workspace })) break
+          setStore("reloadPending", event.properties.pending)
+          break
+        case "config.reload.executing":
+          if (!isCurrentReloadEvent({ directory, workspace })) break
+          if (typeof event.properties.bootstrapCycle === "number") bootstrapCycle = event.properties.bootstrapCycle
+          if (event.properties.executing && bootstrapCycle > 0) {
+            setStore("reloadResult", undefined)
+            scheduleReloadOverlayFallback(bootstrapCycle)
+          }
+          if (!event.properties.executing) clearReloadOverlayFallback()
+          batch(() => {
+            setStore("reloadPending", false)
+            setStore("reloading", event.properties.executing)
+          })
+          break
+        case "config.reload.done":
+          if (!isCurrentReloadEvent({ directory, workspace })) break
+          clearReloadOverlayFallback()
+          bootstrappedReloadCycle = 0
+          batch(() => {
+            setStore("reloadPending", false)
+            setStore("reloading", false)
+            setStore("reloadResult", "success")
+          })
           break
         case "permission.replied": {
           const requests = store.permission[event.properties.sessionID]
@@ -448,9 +621,10 @@ export const {
     const exit = useExit()
     const args = useArgs()
 
-    async function bootstrap(input: { fatal?: boolean } = {}) {
+    async function bootstrap(input: { fatal?: boolean; cycle?: number } = {}) {
       const fatal = input.fatal ?? true
       const workspace = project.workspace.current()
+      const cycle = input.cycle ?? bootstrapCycle
       const projectPromise = project.sync()
       const sessionListPromise = projectPromise.then(() => listSessions())
 
@@ -516,28 +690,89 @@ export const {
         })
         .then(() => {
           if (store.status !== "complete") setStore("status", "partial")
-          // non-blocking
+          // Reload completion should wait for the normal refresh path, but an
+          // optional status endpoint must not keep the reload overlay open forever.
           void Promise.all([
-            ...(args.continue ? [] : [sessionListPromise.then((sessions) => setStore("session", reconcile(sessions)))]),
-            consoleStatePromise.then((consoleState) => setStore("console_state", reconcile(consoleState))),
-            sdk.client.command.list({ workspace }).then((x) => setStore("command", reconcile(x.data ?? []))),
-            sdk.client.lsp.status({ workspace }).then((x) => setStore("lsp", reconcile(x.data ?? []))),
-            sdk.client.mcp.status({ workspace }).then((x) => setStore("mcp", reconcile(x.data ?? {}))),
-            sdk.client.experimental.resource
-              .list({ workspace })
-              .then((x) => setStore("mcp_resource", reconcile(x.data ?? {}))),
-            sdk.client.formatter.status({ workspace }).then((x) => setStore("formatter", reconcile(x.data ?? []))),
-            sdk.client.session.status({ workspace }).then((x) => {
-              setStore("session_status", reconcile(x.data ?? {}))
-            }),
-            sdk.client.provider.auth({ workspace }).then((x) => setStore("provider_auth", reconcile(x.data ?? {}))),
-            sdk.client.vcs.get({ workspace }).then((x) => setStore("vcs", reconcile(x.data))),
-            project.workspace.sync(),
-          ]).then(() => {
-            setStore("status", "complete")
-          })
+            ...(args.continue
+              ? []
+              : [
+                  settleBootstrapRefresh(
+                    "session.list",
+                    sessionListPromise.then((sessions) => setStore("session", reconcile(sessions))),
+                  ),
+                ]),
+            settleBootstrapRefresh(
+              "console.state",
+              consoleStatePromise.then((consoleState) => setStore("console_state", reconcile(consoleState))),
+            ),
+            settleBootstrapRefresh(
+              "command.list",
+              sdk.client.command.list({ workspace }).then((x) => setStore("command", reconcile(x.data ?? []))),
+            ),
+            settleBootstrapRefresh(
+              "lsp.status",
+              sdk.client.lsp.status({ workspace }).then((x) => setStore("lsp", reconcile(x.data ?? []))),
+            ),
+            settleBootstrapRefresh(
+              "mcp.status",
+              sdk.client.mcp.status({ workspace }).then((x) => setStore("mcp", reconcile(x.data ?? {}))),
+            ),
+            settleBootstrapRefresh(
+              "resource.list",
+              sdk.client.experimental.resource
+                .list({ workspace })
+                .then((x) => setStore("mcp_resource", reconcile(x.data ?? {}))),
+            ),
+            settleBootstrapRefresh(
+              "formatter.status",
+              sdk.client.formatter.status({ workspace }).then((x) => setStore("formatter", reconcile(x.data ?? []))),
+            ),
+            settleBootstrapRefresh(
+              "session.status",
+              sdk.client.session.status({ workspace }).then((x) => {
+                setStore("session_status", reconcile(x.data ?? {}))
+              }),
+            ),
+            settleBootstrapRefresh(
+              "provider.auth",
+              sdk.client.provider.auth({ workspace }).then((x) => setStore("provider_auth", reconcile(x.data ?? {}))),
+            ),
+            settleBootstrapRefresh(
+              "vcs.get",
+              sdk.client.vcs.get({ workspace }).then((x) => setStore("vcs", reconcile(x.data))),
+            ),
+            settleBootstrapRefresh("workspace.sync", project.workspace.sync()),
+          ])
+            .then(() => completeBootstrap({ workspace, cycle }))
+            .catch((error) => {
+              console.warn("tui bootstrap completion failed", {
+                cycle,
+                error: error instanceof Error ? error.message : String(error),
+              })
+              if (!isActiveReloadCycle(cycle)) return
+              batch(() => {
+                setStore("reloadPending", false)
+                setStore("reloading", false)
+                setStore("reloadResult", "uncertain")
+              })
+            })
+            .finally(() => {
+              setStore("status", "complete")
+            })
         })
         .catch(async (e) => {
+          await completeBootstrap({ workspace, cycle }).catch((error) => {
+            console.warn("tui bootstrap completion failed", {
+              cycle,
+              error: error instanceof Error ? error.message : String(error),
+            })
+            if (!isActiveReloadCycle(cycle)) return
+            batch(() => {
+              setStore("reloadPending", false)
+              setStore("reloading", false)
+              setStore("reloadResult", "uncertain")
+            })
+          })
           console.error("tui bootstrap failed", {
             error: e instanceof Error ? e.message : String(e),
             name: e instanceof Error ? e.name : undefined,
@@ -558,6 +793,9 @@ export const {
     const result = {
       data: store,
       set: setStore,
+      reload: {
+        start: startReload,
+      },
       get status() {
         return store.status
       },

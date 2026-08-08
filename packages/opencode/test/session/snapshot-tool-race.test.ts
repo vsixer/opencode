@@ -18,6 +18,7 @@ import fs from "fs/promises"
 import path from "path"
 import { Session } from "@/session/session"
 import { SessionPrompt } from "../../src/session/prompt"
+import { ConfigReload } from "@/config/reload"
 import { SessionSummary } from "../../src/session/summary"
 import { MessageV2 } from "../../src/session/message-v2"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
@@ -91,6 +92,14 @@ const it = testEffect(
     [MCP.node, mcp],
     [LSP.node, lsp],
     [RuntimeFlags.node, RuntimeFlags.layer({ experimentalEventSystem: true })],
+    [
+      ConfigReload.node,
+      Layer.mock(ConfigReload.Service)({
+        start: () => Effect.void,
+        finish: () => Effect.void,
+        check: () => Effect.void,
+      }),
+    ],
   ]),
 )
 

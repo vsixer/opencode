@@ -67,6 +67,9 @@ export type Event =
   | EventQuestionV2Asked
   | EventQuestionV2Replied
   | EventQuestionV2Rejected
+  | EventConfigReloadPending
+  | EventConfigReloadExecuting
+  | EventConfigReloadDone
   | EventTodoUpdated
   | EventLspUpdated
   | EventPermissionAsked
@@ -106,6 +109,13 @@ export type QuestionRejected = {
   requestID: string
 }
 
+export type InvalidRequestError = {
+  _tag: "InvalidRequestError"
+  message: string
+  kind?: string
+  field?: string
+}
+
 export type OAuth = {
   type: "oauth"
   refresh: string
@@ -133,13 +143,6 @@ export type Auth = OAuth | ApiAuth | WellKnownAuth
 
 export type EffectHttpApiErrorBadRequest = {
   _tag: "BadRequest"
-}
-
-export type InvalidRequestError = {
-  _tag: "InvalidRequestError"
-  message: string
-  kind?: string
-  field?: string
 }
 
 export type MoveSessionError = {
@@ -1360,6 +1363,28 @@ export type GlobalEvent = {
       }
     | {
         id: string
+        type: "config.reload.pending"
+        properties: {
+          pending: boolean
+        }
+      }
+    | {
+        id: string
+        type: "config.reload.executing"
+        properties: {
+          executing: boolean
+          bootstrapCycle?: number
+        }
+      }
+    | {
+        id: string
+        type: "config.reload.done"
+        properties: {
+          [key: string]: unknown
+        }
+      }
+    | {
+        id: string
         type: "todo.updated"
         properties: {
           sessionID: string
@@ -1706,6 +1731,7 @@ export type AgentConfig = {
   steps?: number
   maxSteps?: number
   permission?: PermissionConfig
+  merge?: "append" | "prepend" | "replace"
   [key: string]:
     | unknown
     | string
@@ -1730,6 +1756,9 @@ export type AgentConfig = {
     | "info"
     | number
     | PermissionConfig
+    | "append"
+    | "prepend"
+    | "replace"
     | undefined
 }
 
@@ -1896,6 +1925,7 @@ export type Config = {
       model?: string
       variant?: string
       subtask?: boolean
+      merge?: "append" | "prepend" | "replace"
     }
   }
   skills?: {
@@ -2915,6 +2945,9 @@ export type V2Event =
   | QuestionV2Asked
   | QuestionV2Replied
   | QuestionV2Rejected
+  | ConfigReloadPending
+  | ConfigReloadExecuting
+  | ConfigReloadDone
   | TodoUpdated
   | LspUpdated
   | PermissionAsked
@@ -5658,6 +5691,58 @@ export type QuestionV2Rejected = {
   }
 }
 
+export type ConfigReloadPending = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "config.reload.pending"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: number
+  }
+  location?: LocationRef
+  data: {
+    pending: boolean
+  }
+}
+
+export type ConfigReloadExecuting = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "config.reload.executing"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: number
+  }
+  location?: LocationRef
+  data: {
+    executing: boolean
+    bootstrapCycle?: number
+  }
+}
+
+export type ConfigReloadDone = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "config.reload.done"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: number
+  }
+  location?: LocationRef
+  data: {
+    [key: string]: unknown
+  }
+}
+
 export type TodoUpdated = {
   id: string
   metadata?: {
@@ -6839,6 +6924,31 @@ export type EventQuestionV2Rejected = {
   }
 }
 
+export type EventConfigReloadPending = {
+  id: string
+  type: "config.reload.pending"
+  properties: {
+    pending: boolean
+  }
+}
+
+export type EventConfigReloadExecuting = {
+  id: string
+  type: "config.reload.executing"
+  properties: {
+    executing: boolean
+    bootstrapCycle?: number
+  }
+}
+
+export type EventConfigReloadDone = {
+  id: string
+  type: "config.reload.done"
+  properties: {
+    [key: string]: unknown
+  }
+}
+
 export type EventTodoUpdated = {
   id: string
   type: "todo.updated"
@@ -7093,6 +7203,69 @@ export type BadRequestError = {
     kind?: "Params" | "Headers" | "Query" | "Body" | "Payload"
   }
 }
+
+export type ConfigReloadStatusData = {
+  body?: never
+  path?: never
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/config/reload/status"
+}
+
+export type ConfigReloadStatusErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+}
+
+export type ConfigReloadStatusError = ConfigReloadStatusErrors[keyof ConfigReloadStatusErrors]
+
+export type ConfigReloadStatusResponses = {
+  /**
+   * Configuration reload status
+   */
+  200: {
+    pending: boolean
+    executing: boolean
+    bootstrapCycle?: number
+  }
+}
+
+export type ConfigReloadStatusResponse = ConfigReloadStatusResponses[keyof ConfigReloadStatusResponses]
+
+export type ConfigBootstrapCompleteData = {
+  body?: never
+  path?: never
+  query: {
+    directory?: string
+    workspace?: string
+    cycle: string
+  }
+  url: "/config/bootstrap-complete"
+}
+
+export type ConfigBootstrapCompleteErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+}
+
+export type ConfigBootstrapCompleteError = ConfigBootstrapCompleteErrors[keyof ConfigBootstrapCompleteErrors]
+
+export type ConfigBootstrapCompleteResponses = {
+  /**
+   * Bootstrap completion result
+   */
+  200: {
+    success: boolean
+  }
+}
+
+export type ConfigBootstrapCompleteResponse = ConfigBootstrapCompleteResponses[keyof ConfigBootstrapCompleteResponses]
 
 export type AuthRemoveData = {
   body?: never
@@ -7623,6 +7796,38 @@ export type ConfigProvidersResponses = {
 }
 
 export type ConfigProvidersResponse = ConfigProvidersResponses[keyof ConfigProvidersResponses]
+
+export type ConfigReloadData = {
+  body?: never
+  path?: never
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/config/reload"
+}
+
+export type ConfigReloadErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+}
+
+export type ConfigReloadError = ConfigReloadErrors[keyof ConfigReloadErrors]
+
+export type ConfigReloadResponses = {
+  /**
+   * Configuration reload request result
+   */
+  200: {
+    success: boolean
+    immediate: boolean
+    bootstrapCycle?: number
+  }
+}
+
+export type ConfigReloadResponse = ConfigReloadResponses[keyof ConfigReloadResponses]
 
 export type ExperimentalCapabilitiesGetData = {
   body?: never
