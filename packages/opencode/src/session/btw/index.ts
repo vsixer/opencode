@@ -86,6 +86,10 @@ type TurnCtx = {
   parts: SessionV1.Part[]
   toolcalls: Map<string, SessionV1.ToolPart>
   currentText?: SessionV1.TextPart
+  // Единственный признак провала тура: выставляется и стримовым catchCause
+  // (обрыв транспорта), и событием provider-error. runTurn по нему возвращает
+  // "stop", иначе слепой рестарт runLoop маскировал бы обрыв как «продолжить».
+  errored: boolean
 }
 
 // === Хелперы ===============================================================
@@ -387,7 +391,10 @@ const onEvent = (state: BtwState, turn: TurnCtx, queue: Queue.Queue<BtwPart, Cau
         return
       }
       case "provider-error": {
-        yield* Queue.offer(queue, { type: "error", message: (event as { message: string }).message })
+        const message = (event as { message: string }).message
+        turn.errored = true
+        yield* Effect.logError("btw provider error", { ...btwLogCtx(state), error: message })
+        yield* Queue.offer(queue, { type: "error", message })
         return
       }
       default:
@@ -396,6 +403,14 @@ const onEvent = (state: BtwState, turn: TurnCtx, queue: Queue.Queue<BtwPart, Cau
   })
 
 // === Один LLM-тур ==========================================================
+
+const btwLogCtx = (state: BtwState) => ({
+  "btw.session.id": state.btwSessionID,
+  providerID: state.model.providerID,
+  modelID: state.model.api.id,
+  agent: state.agent.name,
+  mode: state.agent.mode,
+})
 
 const runTurn = (state: BtwState, queue: Queue.Queue<BtwPart, Cause.Done>) =>
   Effect.gen(function* () {
@@ -411,7 +426,7 @@ const runTurn = (state: BtwState, queue: Queue.Queue<BtwPart, Cause.Done>) =>
     const llm = yield* LLM.Service
 
     const assistant = makeAssistant(state, user.id)
-    const turn: TurnCtx = { assistant, parts: [], toolcalls: new Map() }
+    const turn: TurnCtx = { assistant, parts: [], toolcalls: new Map(), errored: false }
     const handle = makeHandle(state, turn, queue)
 
     const tools = yield* SessionTools.resolve({
@@ -451,6 +466,8 @@ const runTurn = (state: BtwState, queue: Queue.Queue<BtwPart, Cause.Done>) =>
       Stream.runDrain,
       Effect.catchCause((cause) =>
         Effect.gen(function* () {
+          turn.errored = true
+          yield* Effect.logError("btw stream error", { ...btwLogCtx(state), error: Cause.squash(cause) })
           yield* Queue.offer(queue, { type: "error", message: errorMessage(cause) ?? "stream error" })
         }),
       ),
@@ -464,6 +481,7 @@ const runTurn = (state: BtwState, queue: Queue.Queue<BtwPart, Cause.Done>) =>
       finish: assistant.finish,
     })
 
+    if (turn.errored) return "stop" as const
     const finished = assistant.finish && !["tool-calls", "unknown"].includes(assistant.finish)
     return (finished ? "stop" : "continue") as "stop" | "continue"
   })
@@ -481,6 +499,7 @@ const runLoop = (state: BtwState, queue: Queue.Queue<BtwPart, Cause.Done>) =>
       result = yield* runTurn(state, queue).pipe(
         Effect.catchCause((cause) =>
           Effect.gen(function* () {
+            yield* Effect.logError("btw turn error", { ...btwLogCtx(state), error: Cause.squash(cause) })
             yield* Queue.offer(queue, { type: "error", message: errorMessage(cause) ?? "turn error" })
             return "stop" as const
           }),
@@ -491,7 +510,10 @@ const runLoop = (state: BtwState, queue: Queue.Queue<BtwPart, Cause.Done>) =>
   }).pipe(
     Effect.timeout(Duration.seconds(120)),
     Effect.catchTag("TimeoutError", () =>
-      Queue.offer(queue, { type: "error", message: "btw: timed out (no response in 120s)" }),
+      Effect.gen(function* () {
+        yield* Effect.logError("btw turn timed out", { ...btwLogCtx(state), timeout: "120s" })
+        yield* Queue.offer(queue, { type: "error", message: "btw: timed out (no response in 120s)" })
+      }),
     ),
     Effect.ensuring(
       Effect.gen(function* () {

@@ -53,6 +53,41 @@ describe("btw queue lifecycle", () => {
       ),
     ).rejects.toThrow()
   })
+
+  // Когда стрим падает на середине, терминал (error-кадр), предложенный в
+  // Stream.catchCause, должен дойти до consumer'а по порядку — после
+  // предшествующих дельт и до закрытия очереди (Queue.end). Иначе обрыв
+  // транспорта маскировался бы: клиент не получает ни ответа, ни терминала и
+  // видит пустой сброс. Pipeline повторяет форму runTurn:
+  // stream.pipe(Stream.tap(offer), Stream.runDrain, Effect.catchCause(offer)).
+  test("stream catchCause terminal drained in order before Queue.end", async () => {
+    const collected = await Effect.runPromise(
+      Effect.gen(function* () {
+        const queue = yield* Queue.unbounded<string, Cause.Done>()
+        const failed = yield* Deferred.make<void>()
+        const stream = Stream.fromIterable(["delta-a", "delta-b"]).pipe(
+          Stream.concat(Stream.fail(new Error("transport drop"))),
+          Stream.tap((c) => Queue.offer(queue, c)),
+          Stream.runDrain,
+          Effect.catchCause((cause) =>
+            Effect.gen(function* () {
+              const squashed = Cause.squash(cause)
+              const msg = squashed instanceof Error ? squashed.message : String(squashed)
+              yield* Queue.offer(queue, "error:" + msg)
+              yield* Deferred.succeed(failed, undefined)
+            }),
+          ),
+        )
+        yield* Effect.forkScoped(stream)
+        yield* Deferred.await(failed)
+        yield* Queue.end(queue)
+        return yield* Stream.runCollect(Stream.fromQueue(queue)).pipe(
+          Effect.map((c) => Array.from(c)),
+        )
+      }).pipe(Effect.scoped),
+    )
+    expect(collected).toEqual(["delta-a", "delta-b", "error:transport drop"])
+  })
 })
 
 // Abort-путь /btw/abort: Btw.abort предлагает в activeQueue терминальный кадр

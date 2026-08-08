@@ -161,6 +161,15 @@ export function BtwPanel(props: { parentID: string; width: number }) {
     )
   }
 
+  // На провале тура раскрыть накопленный reasoning: иначе обрыв стрима после
+  // фазы раздумий выглядит как пустой ответ, и пользователь не видит, что
+  // модель думала. Разворачиваем только при наличии reasoning и без текста.
+  function surfaceReasoningOnFailure(id: string) {
+    const msg = messages().find((m) => m.id === id)
+    if (!msg || msg.role !== "assistant" || msg.reasoning.length === 0 || msg.text) return
+    setExpandedThinking((prev) => (prev.has(id) ? prev : new Set(prev).add(id)))
+  }
+
   function handlePart(part: BtwChunk, assistantId: string) {
     switch (part.type) {
       case "reasoning-delta":
@@ -188,6 +197,7 @@ export function BtwPanel(props: { parentID: string; width: number }) {
         break
       case "error":
         setError(part.message)
+        surfaceReasoningOnFailure(assistantId)
         break
       case "warning":
         // поверхностно игнорируем; при желании можно показать
@@ -241,7 +251,9 @@ export function BtwPanel(props: { parentID: string; width: number }) {
       else if (inactiveTimedOut) setError("btw: stalled (no data in 30s)")
       else if (userAborted) {
         if (!error()) setError("btw: aborted")
-      } else if (!abort.signal.aborted) setError(errMessage(e))
+      } else if (abort.signal.aborted) setError("btw: connection lost")
+      else setError(errMessage(e))
+      surfaceReasoningOnFailure(assistantId)
     } finally {
       clearTimeout(hardTimer)
       if (inactivityTimer) clearTimeout(inactivityTimer)
