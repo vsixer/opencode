@@ -39,9 +39,13 @@ import type { BtwPart } from "./schema"
 
 const MAX_TURNS = 50
 
-// task спавнит реальную дочернюю сессию (пишет SessionTable) — нарушает
-// эфемерность, поэтому выключается в /btw.
-const DISABLED_TOOLS = new Set(["task"])
+// Инструменты, непригодные для эфемерного side-chat /btw:
+//  - task: спавнит реальную дочернюю сессию (пишет SessionTable) — нарушает
+//    эфемерность btw.
+//  - question: блокирует тур, ожидая ответа пользователя через TUI. У btw-панели
+//    нет UI для ответа, поэтому ответ никогда не придёт и тур висит до серверного
+//    timeout (run 55c95cc9: question → asking que_* → btw turn timed out 120s).
+const DISABLED_TOOLS = new Set(["task", "question"])
 
 const BTW_PROMPT_OPS: TaskPromptOps = {
   cancel: () => Effect.void,

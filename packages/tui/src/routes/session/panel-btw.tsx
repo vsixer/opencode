@@ -65,6 +65,9 @@ export function BtwPanel(props: { parentID: string; width: number }) {
   // Развёрнутые thinking-блоки (по id ассистент-сообщения). По умолчанию каждый
   // thinking свёрнут в однострочный маркер — клик по маркеру разворачивает текст.
   const [expandedThinking, setExpandedThinking] = createSignal<Set<string>>(new Set<string>())
+  // Все ту́лы сообщения свёрнуты в один блок-маркер (как thinking); клик по
+  // маркеру разворачивает весь список с выводами. Ключ — msg.id.
+  const [expandedTools, setExpandedTools] = createSignal<Set<string>>(new Set<string>())
   // Секундомер идущего тура: виден в шапке как индикатор выполнения запроса.
   const [elapsed, setElapsed] = createSignal(0)
   const abort = new AbortController()
@@ -161,6 +164,30 @@ export function BtwPanel(props: { parentID: string; width: number }) {
     )
   }
 
+  // Throttle стриминговых апдейтов: дельты накапливаются в mutable pending и
+  // сбрасываются в signal не чаще каждые 50ms. Без этого тур с тысячами дельт
+  // (diag run bb594ff8: 3269 reasoning-delta + 874 text-delta) вызывает
+  // O(n²) перерисовок markdown и намертво вешает TUI. pending переинициализируется
+  // на каждый тур в send().
+  let pendingPatch: { text: string; reasoning: string; tools: ToolEntry[] } = { text: "", reasoning: "", tools: [] }
+  let flushTimer: ReturnType<typeof setTimeout> | undefined
+  function flushPending(assistantId: string) {
+    patchAssistant(assistantId, () => ({
+      text: pendingPatch.text,
+      reasoning: pendingPatch.reasoning,
+      // Новая ссылка массива на каждом flush — иначе SolidJS <For> по tools
+      // не замечает in-place мутаций pendingPatch.tools (running→completed/output).
+      tools: [...pendingPatch.tools],
+    }))
+  }
+  function scheduleFlush(assistantId: string) {
+    if (flushTimer) return
+    flushTimer = setTimeout(() => {
+      flushTimer = undefined
+      flushPending(assistantId)
+    }, 50)
+  }
+
   // На провале тура раскрыть накопленный reasoning: иначе обрыв стрима после
   // фазы раздумий выглядит как пустой ответ, и пользователь не видит, что
   // модель думала. Разворачиваем только при наличии reasoning и без текста.
@@ -173,29 +200,33 @@ export function BtwPanel(props: { parentID: string; width: number }) {
   function handlePart(part: BtwChunk, assistantId: string) {
     switch (part.type) {
       case "reasoning-delta":
-        patchAssistant(assistantId, (s) => ({ text: s.text, reasoning: s.reasoning + part.delta, tools: s.tools }))
+        pendingPatch.reasoning += part.delta
+        scheduleFlush(assistantId)
         break
       case "text-delta":
-        patchAssistant(assistantId, (s) => ({ text: s.text + part.delta, reasoning: s.reasoning, tools: s.tools }))
+        pendingPatch.text += part.delta
+        scheduleFlush(assistantId)
         break
-      case "tool":
-        patchAssistant(assistantId, (s) => {
-          const entry: ToolEntry = {
-            callID: part.callID,
-            tool: part.tool,
-            state: part.state,
-            title: part.title,
-            output: part.output,
-            error: part.error,
-          }
-          const idx = s.tools.findIndex((t) => t.callID === entry.callID)
-          const tools = [...s.tools]
-          if (idx >= 0) tools[idx] = entry
-          else tools.push(entry)
-          return { text: s.text, reasoning: s.reasoning, tools }
-        })
+      case "tool": {
+        const entry: ToolEntry = {
+          callID: part.callID,
+          tool: part.tool,
+          state: part.state,
+          title: part.title,
+          output: part.output,
+          error: part.error,
+        }
+        const idx = pendingPatch.tools.findIndex((t) => t.callID === entry.callID)
+        if (idx >= 0) pendingPatch.tools[idx] = entry
+        else pendingPatch.tools.push(entry)
+        scheduleFlush(assistantId)
         break
+      }
       case "error":
+        // флешим накопленное до показа ошибки, чтобы контекст (text/reasoning)
+        // был актуален для surfaceReasoningOnFailure
+        if (flushTimer) { clearTimeout(flushTimer); flushTimer = undefined }
+        flushPending(assistantId)
         setError(part.message)
         surfaceReasoningOnFailure(assistantId)
         break
@@ -213,49 +244,83 @@ export function BtwPanel(props: { parentID: string; width: number }) {
     userAborted = false
     setMessages((m) => [...m, { role: "user", id: "u" + Date.now(), text }])
     const assistantId = appendAssistant()
-    // Per-turn abort (component-scope): связывает panel-level abort, hard-timeout
-    // и inactivity-timeout.
+    pendingPatch = { text: "", reasoning: "", tools: [] }
+    // Per-turn abort (component-scope): связывает panel-level abort и
+    // inactivity-timeout. Отдельный hard-cap убран: он preempt'ил серверный
+    // 120s timeout (runLoop), не давая дойти до его {type:"error"} кадра и
+    // порождая пустой сброс. Сервер — авторитет по завершению тура; inactivity
+    // (135s) стоит выше серверского 120s и ловит только подлинно мёртвый
+    // транспорт (нет даже терминального кадра).
     turnAbort = new AbortController()
     const onPanelAbort = () => turnAbort?.abort()
     abort.signal.addEventListener("abort", onPanelAbort)
-    let hardTimedOut = false
     let inactiveTimedOut = false
-    // Hard-stop: полностью глухое зависание (дохлый транспорт без терминала и EOF).
-    const hardTimer = setTimeout(() => {
-      hardTimedOut = true
-      turnAbort?.abort()
-    }, 60_000)
-    // Inactivity: нет чанков 30s → транспорт полудохлый. Сбрасывается на каждом партe.
+    // Два режима провала транспорта. Когда ответный текст уже получен,
+    // зависание провайдера (zai-coding-plan/glm-5.2 рвёт соединение mid-stream
+    // после текста) не должно пугать пользователя ошибкой — ответ ведь есть.
+    // Поэтому после текста inactivity короткий (20s): по истечении клиент
+    // финализирует тур без ошибки, просто снимая спиннер, а локальный аборт рвёт
+    // SSE-соединение, закрывает серверный scope и чистит зависший runLoop. Без
+    // текста — длинный (135s > серверского 120s), чтобы сервер успел доставить
+    // свой терминальный кадр «btw: timed out» через EOF-flush.
+    let answerTextSeen = false
+    const stallDelay = () => (answerTextSeen ? 20_000 : 135_000)
     let inactivityTimer: ReturnType<typeof setTimeout> | undefined = setTimeout(() => {
       inactiveTimedOut = true
       turnAbort?.abort()
-    }, 30_000)
+    }, stallDelay())
     const resetInactivity = () => {
       if (inactivityTimer) clearTimeout(inactivityTimer)
       inactivityTimer = setTimeout(() => {
         inactiveTimedOut = true
         turnAbort?.abort()
-      }, 30_000)
+      }, stallDelay())
     }
+    const classifyAbort = (): string | undefined => {
+      // Текст получен → финализируем без ошибки (ответ есть, провайдер лишь не
+      // закрыл поток чисто). Без текста → подлинный «stalled».
+      if (inactiveTimedOut) return answerTextSeen ? undefined : "btw: stalled (no data in 135s)"
+      if (userAborted) return "btw: aborted"
+      if (abort.signal.aborted) return "btw: connection lost"
+      return undefined
+    }
+    // Штатная терминация стрима (turn-end/error/closed от сервера). Если тур
+    // завершён нормально, finally не должен перекрывать результат своей
+    // классификацией обрыва.
+    let terminated = false
     try {
       const resp = await sdk.client.btw.send({ btwID: id, text }, { signal: turnAbort.signal, sseMaxRetryAttempts: 0 })
       for await (const raw of resp.stream) {
         if (turnAbort?.signal.aborted) break
-        resetInactivity()
         const part = raw as unknown as BtwChunk
+        if (part.type === "text-delta") answerTextSeen = true
+        resetInactivity()
         handlePart(part, assistantId)
-        if (part.type === "turn-end" || part.type === "error" || part.type === "closed") break
+        if (part.type === "turn-end" || part.type === "error" || part.type === "closed") {
+          terminated = true
+          break
+        }
       }
     } catch (e) {
-      if (hardTimedOut) setError("btw: timed out (no response in 60s)")
-      else if (inactiveTimedOut) setError("btw: stalled (no data in 30s)")
-      else if (userAborted) {
-        if (!error()) setError("btw: aborted")
-      } else if (abort.signal.aborted) setError("btw: connection lost")
-      else setError(errMessage(e))
+      if (!error()) setError(classifyAbort() ?? errMessage(e))
       surfaceReasoningOnFailure(assistantId)
     } finally {
-      clearTimeout(hardTimer)
+      // Сбросить остатки стримингового буфера и остановить троттл-таймер, чтобы
+      // финальный текст/reasoning гарантированно попали в signal до снятия busy.
+      if (flushTimer) { clearTimeout(flushTimer); flushTimer = undefined }
+      flushPending(assistantId)
+      // Свой собственный таймер (inactivity) отменяет SSE-читатель через
+      // reader.cancel() → стрим завершается чистым EOF без throw, catch выше
+      // не срабатывает. Без этой ветки панель сбрасывается в пустоту:
+      // spinner гаснет, ошибки нет, reasoning свёрнут — ровно тот «пустой
+      // обрыв», что наблюдался у plan-агента в 6-туровом цикле (run 3437a807).
+      if (!terminated && !error()) {
+        const msg = classifyAbort()
+        if (msg) {
+          setError(msg)
+          surfaceReasoningOnFailure(assistantId)
+        }
+      }
       if (inactivityTimer) clearTimeout(inactivityTimer)
       abort.signal.removeEventListener("abort", onPanelAbort)
       turnAbort = null
@@ -273,6 +338,15 @@ export function BtwPanel(props: { parentID: string; width: number }) {
 
   function toggleThinking(id: string) {
     setExpandedThinking((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  function toggleTools(id: string) {
+    setExpandedTools((prev) => {
       const next = new Set(prev)
       if (next.has(id)) next.delete(id)
       else next.add(id)
@@ -381,7 +455,14 @@ export function BtwPanel(props: { parentID: string; width: number }) {
                   </Show>
                 </Show>
                 <Show when={msg.role === "user"}>
-                  <text fg={theme.text}>you: {msg.text}</text>
+                  <box
+                    marginTop={1}
+                    backgroundColor={theme.backgroundElement}
+                    paddingLeft={1}
+                    paddingRight={1}
+                  >
+                    <text fg={theme.text}>you: {msg.text}</text>
+                  </box>
                 </Show>
                 <Show when={msg.role === "assistant" && msg.text}>
                   <text fg={theme.textMuted}>btw</text>
@@ -396,19 +477,40 @@ export function BtwPanel(props: { parentID: string; width: number }) {
                   />
                 </Show>
                 <Show when={msg.role === "assistant" && msg.tools.length > 0}>
-                  <For each={(msg as { tools: ToolEntry[] }).tools}>
-                    {(t) => (
-                      <text fg={theme.textMuted}>
-                        {"  ["}
-                        {t.state}
-                        {"] "}
-                        {t.tool}
-                        {t.title ? ` — ${t.title}` : ""}
-                        {t.error ? ` (error: ${t.error})` : ""}
-                        {t.output ? `\n  ${t.output.slice(0, 300)}` : ""}
-                      </text>
-                    )}
-                  </For>
+                  <text
+                    fg={theme.textMuted}
+                    onMouseUp={() => {
+                      // Не переключаем при выделении текста для копирования.
+                      if (renderer.getSelection()?.getSelectedText()) return
+                      toggleTools(msg.id)
+                    }}
+                  >
+                    {expandedTools().has(msg.id) ? "▾" : "▸"}
+                    {` tools (${(msg as { tools: ToolEntry[] }).tools.length})`}
+                  </text>
+                  <Show when={expandedTools().has(msg.id)}>
+                    <For each={(msg as { tools: ToolEntry[] }).tools}>
+                      {(t) => (
+                        <box flexDirection="column">
+                          <text fg={theme.textMuted}>
+                            {"  ["}
+                            {t.state}
+                            {"] "}
+                            {t.tool}
+                            {t.title ? ` — ${t.title}` : ""}
+                            {t.error ? ` (error: ${t.error})` : ""}
+                          </text>
+                          <Show when={t.output}>
+                            <text fg={theme.textMuted}>
+                              {"  "}
+                              {t.output!.slice(0, 2000)}
+                              {t.output!.length > 2000 ? " …" : ""}
+                            </text>
+                          </Show>
+                        </box>
+                      )}
+                    </For>
+                  </Show>
                 </Show>
               </box>
             )}
