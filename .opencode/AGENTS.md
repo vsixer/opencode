@@ -21,7 +21,3 @@ Fork-specific feature docs live in `docs-vsixer/features/`. Index: `docs-vsixer/
 3. Use the «Расхождение с upstream» section of that page to identify the conflict surface before editing upstream-adjacent code.
 
 To document a new feature implemented in the current branch, use the `/document-feature` command (`.opencode/command/document-feature.md`).
-
-## Rule: do not edit upstream-owned files
-
-Only add files under fork-owned paths (`docs-vsixer/`, `.opencode/`, `.ocl-builds/`). Upstream-owned files (`README*.md`, `CONTRIBUTING.md`, `packages/`, `script/`, `specs/`, etc.) must not be edited — that is the conflict surface during `git merge upstream/dev`. Record any unavoidable upstream deviation in the relevant `docs-vsixer/features/<name>.md`.

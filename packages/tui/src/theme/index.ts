@@ -385,6 +385,7 @@ export function generateSystem(colors: TerminalColors, mode: "dark" | "light"): 
     white: col(7),
     redBright: col(9),
     greenBright: col(10),
+    orange: col(208),
   }
 
   const diffAlpha = isDark ? 0.22 : 0.14
@@ -458,7 +459,7 @@ export function generateSystem(colors: TerminalColors, mode: "dark" | "light"): 
       syntaxComment: textMuted,
       syntaxKeyword: ansiColors.magenta,
       syntaxFunction: ansiColors.blue,
-      syntaxVariable: fg,
+      syntaxVariable: ansiColors.orange,
       syntaxString: ansiColors.green,
       syntaxNumber: ansiColors.yellow,
       syntaxType: ansiColors.cyan,
@@ -746,15 +747,41 @@ function getSyntaxRules(theme: Theme) {
       },
     },
     {
-      scope: ["variable.builtin", "type.builtin", "function.builtin", "module.builtin", "constant.builtin"],
+      scope: ["variable.builtin"],
       style: {
-        foreground: theme.error,
+        foreground: theme.syntaxVariable,
       },
     },
     {
       scope: ["variable.super"],
       style: {
-        foreground: theme.error,
+        foreground: theme.syntaxKeyword,
+        italic: true,
+      },
+    },
+    {
+      scope: ["tag"],
+      style: {
+        foreground: theme.syntaxKeyword,
+      },
+    },
+    {
+      scope: ["type.builtin", "module.builtin"],
+      style: {
+        foreground: theme.syntaxType,
+        bold: true,
+      },
+    },
+    {
+      scope: ["function.builtin"],
+      style: {
+        foreground: theme.syntaxFunction,
+      },
+    },
+    {
+      scope: ["constant.builtin"],
+      style: {
+        foreground: theme.syntaxNumber,
       },
     },
     {
