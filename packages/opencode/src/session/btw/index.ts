@@ -26,7 +26,7 @@ import { SystemPrompt } from "../system"
 import { MessageID, PartID, SessionID } from "../schema"
 import { SessionTools } from "../tools"
 
-import { Cause, Deferred, Duration, Effect, Queue, Schema } from "effect"
+import { Cause, Deferred, Effect, Queue, Schema } from "effect"
 import * as Stream from "effect/Stream"
 import type { LLMEvent } from "@opencode-ai/llm"
 import type { Provider as ProviderModel } from "@/provider/provider"
@@ -512,13 +512,11 @@ const runLoop = (state: BtwState, queue: Queue.Queue<BtwPart, Cause.Done>) =>
     }
     yield* Queue.offer(queue, { type: "turn-end" })
   }).pipe(
-    Effect.timeout(Duration.seconds(120)),
-    Effect.catchTag("TimeoutError", () =>
-      Effect.gen(function* () {
-        yield* Effect.logError("btw turn timed out", { ...btwLogCtx(state), timeout: "120s" })
-        yield* Queue.offer(queue, { type: "error", message: "btw: timed out (no response in 120s)" })
-      }),
-    ),
+    // Серверный wall-clock таймаут тура убран намеренно: основная сессия opencode
+    // его не имеет, и 120s обрывали легитимно долгие ответы (plan-агент). Runaway
+    // ту́ловых циклов ограничен MAX_TURNS=50; тихое зависание провайдера ловит
+    // клиентский inactivity (135s без текста / 20s после текста) — серверный
+    // таймаут при uninterruptible-стриме всё равно не срабатывал.
     Effect.ensuring(
       Effect.gen(function* () {
         state.busy = false
