@@ -165,13 +165,18 @@ export function BtwPanel(props: { parentID: string; width: number }) {
   }
 
   // Throttle стриминговых апдейтов: дельты накапливаются в mutable pending и
-  // сбрасываются в signal не чаще каждые 50ms. Без этого тур с тысячами дельт
-  // (diag run bb594ff8: 3269 reasoning-delta + 874 text-delta) вызывает
-  // O(n²) перерисовок markdown и намертво вешает TUI. pending переинициализируется
-  // на каждый тур в send().
+  // сбрасываются в signal либо каждые FLUSH_EVERY кадров, либо через 50ms простоя.
+  // Счётчиковый flush критичен: SSE-кадры приходят плотным потоком микрозадач, а
+  // setTimeout (макротаска) не получает между ними хода — без счётчика текст
+  // отрисовывался бы весь сразу в конце тура. Счётчик же ограничивает число
+  // перерисовок markdown (без throttle O(n²) вешает TUI на тысячах дельт — diag
+  // run bb594ff8). pending переинициализируется на каждый тур в send().
   let pendingPatch: { text: string; reasoning: string; tools: ToolEntry[] } = { text: "", reasoning: "", tools: [] }
+  let pendingCount = 0
+  const FLUSH_EVERY = 8
   let flushTimer: ReturnType<typeof setTimeout> | undefined
   function flushPending(assistantId: string) {
+    pendingCount = 0
     patchAssistant(assistantId, () => ({
       text: pendingPatch.text,
       reasoning: pendingPatch.reasoning,
@@ -180,12 +185,17 @@ export function BtwPanel(props: { parentID: string; width: number }) {
       tools: [...pendingPatch.tools],
     }))
   }
-  function scheduleFlush(assistantId: string) {
-    if (flushTimer) return
-    flushTimer = setTimeout(() => {
-      flushTimer = undefined
+  function markDirty(assistantId: string) {
+    pendingCount++
+    if (pendingCount >= FLUSH_EVERY) {
+      if (flushTimer) { clearTimeout(flushTimer); flushTimer = undefined }
       flushPending(assistantId)
-    }, 50)
+    } else if (!flushTimer) {
+      flushTimer = setTimeout(() => {
+        flushTimer = undefined
+        flushPending(assistantId)
+      }, 50)
+    }
   }
 
   // На провале тура раскрыть накопленный reasoning: иначе обрыв стрима после
@@ -201,11 +211,11 @@ export function BtwPanel(props: { parentID: string; width: number }) {
     switch (part.type) {
       case "reasoning-delta":
         pendingPatch.reasoning += part.delta
-        scheduleFlush(assistantId)
+        markDirty(assistantId)
         break
       case "text-delta":
         pendingPatch.text += part.delta
-        scheduleFlush(assistantId)
+        markDirty(assistantId)
         break
       case "tool": {
         const entry: ToolEntry = {
@@ -219,7 +229,7 @@ export function BtwPanel(props: { parentID: string; width: number }) {
         const idx = pendingPatch.tools.findIndex((t) => t.callID === entry.callID)
         if (idx >= 0) pendingPatch.tools[idx] = entry
         else pendingPatch.tools.push(entry)
-        scheduleFlush(assistantId)
+        markDirty(assistantId)
         break
       }
       case "error":
