@@ -1,6 +1,6 @@
 import { TextareaRenderable, TextAttributes, ScrollBoxRenderable } from "@opentui/core"
 import { useRenderer } from "@opentui/solid"
-import { Show, createEffect, createSignal, For, onCleanup, onMount } from "solid-js"
+import { Show, createEffect, createSignal, For, Index, onCleanup, onMount } from "solid-js"
 import { useTheme } from "../../context/theme"
 import { useSDK } from "../../context/sdk"
 import { useBtw, type BtwRef } from "../../context/btw"
@@ -43,7 +43,7 @@ type ToolEntry = {
 }
 type BtwMessage =
   | { role: "user"; id: string; text: string }
-  | { role: "assistant"; id: string; text: string; reasoning: string; tools: ToolEntry[] }
+  | { role: "assistant"; id: string; text: string; reasoning: string; tools: ToolEntry[]; duration?: number }
 
 export function BtwPanel(props: { parentID: string; width: number }) {
   const sdk = useSDK()
@@ -153,6 +153,7 @@ export function BtwPanel(props: { parentID: string; width: number }) {
       text: string
       reasoning: string
       tools: ToolEntry[]
+      duration?: number
     },
   ) {
     setMessages((m) =>
@@ -164,19 +165,16 @@ export function BtwPanel(props: { parentID: string; width: number }) {
     )
   }
 
-  // Throttle стриминговых апдейтов: дельты накапливаются в mutable pending и
-  // сбрасываются в signal либо каждые FLUSH_EVERY кадров, либо через 50ms простоя.
-  // Счётчиковый flush критичен: SSE-кадры приходят плотным потоком микрозадач, а
-  // setTimeout (макротаска) не получает между ними хода — без счётчика текст
-  // отрисовывался бы весь сразу в конце тура. Счётчик же ограничивает число
-  // перерисовок markdown (без throttle O(n²) вешает TUI на тысячах дельт — diag
-  // run bb594ff8). pending переинициализируется на каждый тур в send().
+  // Throttle стриминговых апдейтов: дельты накапливаются в mutable pending, а
+  // цикл send() сбрасывает буфер в signal каждые FLUSH_EVERY кадров И делает
+  // macrotask-yield. Без yield плотный поток SSE-микрозадач (в одном
+  // reader.read()) не отдаёт хода opentui — текст рисуется весь сразу в конце
+  // тура. yield заставляет opentui перерисовать терминал между порциями. Без
+  // throttle O(n²) перерисовок markdown вешает TUI на тысячах дельт (diag run
+  // bb594ff8). pending переинициализируется на каждый тур в send().
   let pendingPatch: { text: string; reasoning: string; tools: ToolEntry[] } = { text: "", reasoning: "", tools: [] }
-  let pendingCount = 0
   const FLUSH_EVERY = 8
-  let flushTimer: ReturnType<typeof setTimeout> | undefined
   function flushPending(assistantId: string) {
-    pendingCount = 0
     patchAssistant(assistantId, () => ({
       text: pendingPatch.text,
       reasoning: pendingPatch.reasoning,
@@ -185,17 +183,14 @@ export function BtwPanel(props: { parentID: string; width: number }) {
       tools: [...pendingPatch.tools],
     }))
   }
-  function markDirty(assistantId: string) {
-    pendingCount++
-    if (pendingCount >= FLUSH_EVERY) {
-      if (flushTimer) { clearTimeout(flushTimer); flushTimer = undefined }
-      flushPending(assistantId)
-    } else if (!flushTimer) {
-      flushTimer = setTimeout(() => {
-        flushTimer = undefined
-        flushPending(assistantId)
-      }, 50)
-    }
+  // Финальный flush хвоста + запись длительности тура на сообщение.
+  function finalizeAssistant(assistantId: string, durationSec: number) {
+    patchAssistant(assistantId, () => ({
+      text: pendingPatch.text,
+      reasoning: pendingPatch.reasoning,
+      tools: [...pendingPatch.tools],
+      duration: durationSec,
+    }))
   }
 
   // На провале тура раскрыть накопленный reasoning: иначе обрыв стрима после
@@ -211,11 +206,9 @@ export function BtwPanel(props: { parentID: string; width: number }) {
     switch (part.type) {
       case "reasoning-delta":
         pendingPatch.reasoning += part.delta
-        markDirty(assistantId)
         break
       case "text-delta":
         pendingPatch.text += part.delta
-        markDirty(assistantId)
         break
       case "tool": {
         const entry: ToolEntry = {
@@ -229,13 +222,11 @@ export function BtwPanel(props: { parentID: string; width: number }) {
         const idx = pendingPatch.tools.findIndex((t) => t.callID === entry.callID)
         if (idx >= 0) pendingPatch.tools[idx] = entry
         else pendingPatch.tools.push(entry)
-        markDirty(assistantId)
         break
       }
       case "error":
         // флешим накопленное до показа ошибки, чтобы контекст (text/reasoning)
         // был актуален для surfaceReasoningOnFailure
-        if (flushTimer) { clearTimeout(flushTimer); flushTimer = undefined }
         flushPending(assistantId)
         setError(part.message)
         surfaceReasoningOnFailure(assistantId)
@@ -300,12 +291,21 @@ export function BtwPanel(props: { parentID: string; width: number }) {
     let terminated = false
     try {
       const resp = await sdk.client.btw.send({ btwID: id, text }, { signal: turnAbort.signal, sseMaxRetryAttempts: 0 })
+      let streamChunkCount = 0
       for await (const raw of resp.stream) {
         if (turnAbort?.signal.aborted) break
         const part = raw as unknown as BtwChunk
         if (part.type === "text-delta") answerTextSeen = true
         resetInactivity()
         handlePart(part, assistantId)
+        streamChunkCount++
+        if (streamChunkCount % FLUSH_EVERY === 0) {
+          flushPending(assistantId)
+          // macrotask-yield: opentui перерисовывает терминал на макротасках, а
+          // SSE-кадры (плотный поток микрозадач в одном reader.read()) не дают
+          // ему хода. Без этого yield текст рисуется весь сразу в конце тура.
+          await new Promise((r) => setTimeout(r, 0))
+        }
         if (part.type === "turn-end" || part.type === "error" || part.type === "closed") {
           terminated = true
           break
@@ -315,10 +315,11 @@ export function BtwPanel(props: { parentID: string; width: number }) {
       if (!error()) setError(classifyAbort() ?? errMessage(e))
       surfaceReasoningOnFailure(assistantId)
     } finally {
-      // Сбросить остатки стримингового буфера и остановить троттл-таймер, чтобы
-      // финальный текст/reasoning гарантированно попали в signal до снятия busy.
-      if (flushTimer) { clearTimeout(flushTimer); flushTimer = undefined }
-      flushPending(assistantId)
+      // Финальный flush хвоста + запись длительности тура на сообщение.
+      // elapsed() MUST be read before setBusy(false) — createEffect сбрасывает
+      // его в 0, когда busy опускается.
+      const turnDuration = elapsed()
+      finalizeAssistant(assistantId, turnDuration)
       // Свой собственный таймер (inactivity) отменяет SSE-читатель через
       // reader.cancel() → стрим завершается чистым EOF без throw, catch выше
       // не срабатывает. Без этой ветки панель сбрасывается в пустоту:
@@ -436,70 +437,74 @@ export function BtwPanel(props: { parentID: string; width: number }) {
             },
           }}
         >
-          <For each={messages()}>
+          <Index each={messages()}>
             {(msg) => (
               <box flexDirection="column">
-                <Show when={msg.role === "assistant" && (msg as { reasoning: string }).reasoning.length > 0}>
+                <Show when={msg().role === "assistant" && (msg() as { reasoning: string }).reasoning.length > 0}>
                   <text
                     fg={theme.textMuted}
                     onMouseUp={() => {
                       // Не переключаем, если пользователь выделял текст для копирования.
                       if (renderer.getSelection()?.getSelectedText()) return
-                      toggleThinking(msg.id)
+                      toggleThinking(msg().id)
                     }}
                   >
-                    {expandedThinking().has(msg.id) ? "▾ " : "▸ "}
+                    {expandedThinking().has(msg().id) ? "▾ " : "▸ "}
                     thinking
-                    {expandedThinking().has(msg.id)
+                    {expandedThinking().has(msg().id)
                       ? ""
-                      : ` (${(msg as { reasoning: string }).reasoning.length} chars)`}
+                      : ` (${(msg() as { reasoning: string }).reasoning.length} chars)`}
                   </text>
-                  <Show when={expandedThinking().has(msg.id)}>
+                  <Show when={expandedThinking().has(msg().id)}>
                     <code
                       filetype="markdown"
                       streaming={true}
                       syntaxStyle={subtleSyntax()}
-                      content={(msg as { reasoning: string }).reasoning}
+                      content={(msg() as { reasoning: string }).reasoning}
                       fg={theme.textMuted}
                     />
                   </Show>
                 </Show>
-                <Show when={msg.role === "user"}>
+                <Show when={msg().role === "user"}>
                   <box
                     marginTop={1}
                     backgroundColor={theme.backgroundElement}
                     paddingLeft={1}
                     paddingRight={1}
                   >
-                    <text fg={theme.text}>you: {msg.text}</text>
+                    <text fg={theme.text}>you: {msg().text}</text>
                   </box>
                 </Show>
-                <Show when={msg.role === "assistant" && msg.text}>
-                  <text fg={theme.textMuted}>btw</text>
+                <Show when={msg().role === "assistant" && msg().text}>
+                  <text fg={theme.textMuted}>
+                    btw{(msg() as { duration?: number }).duration !== undefined
+                      ? ` · ${(msg() as { duration?: number }).duration}s`
+                      : ""}
+                  </text>
                   <markdown
                     syntaxStyle={syntax()}
                     streaming={true}
                     internalBlockMode="top-level"
-                    content={msg.text}
+                    content={msg().text}
                     tableOptions={{ style: "grid" }}
                     fg={theme.markdownText}
                     bg={theme.background}
                   />
                 </Show>
-                <Show when={msg.role === "assistant" && msg.tools.length > 0}>
+                <Show when={msg().role === "assistant" && (msg() as { tools: ToolEntry[] }).tools.length > 0}>
                   <text
                     fg={theme.textMuted}
                     onMouseUp={() => {
                       // Не переключаем при выделении текста для копирования.
                       if (renderer.getSelection()?.getSelectedText()) return
-                      toggleTools(msg.id)
+                      toggleTools(msg().id)
                     }}
                   >
-                    {expandedTools().has(msg.id) ? "▾" : "▸"}
-                    {` tools (${(msg as { tools: ToolEntry[] }).tools.length})`}
+                    {expandedTools().has(msg().id) ? "▾" : "▸"}
+                    {` tools (${(msg() as { tools: ToolEntry[] }).tools.length})`}
                   </text>
-                  <Show when={expandedTools().has(msg.id)}>
-                    <For each={(msg as { tools: ToolEntry[] }).tools}>
+                  <Show when={expandedTools().has(msg().id)}>
+                    <For each={(msg() as { tools: ToolEntry[] }).tools}>
                       {(t) => (
                         <box flexDirection="column">
                           <text fg={theme.textMuted}>
@@ -524,7 +529,7 @@ export function BtwPanel(props: { parentID: string; width: number }) {
                 </Show>
               </box>
             )}
-          </For>
+          </Index>
           <Show when={error()}>
             {(e) => <text fg={theme.error}>{e()}</text>}
           </Show>
