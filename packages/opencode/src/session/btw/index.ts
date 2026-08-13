@@ -37,8 +37,6 @@ import type { BtwPart } from "./schema"
 
 // === Константы =============================================================
 
-const MAX_TURNS = 50
-
 // Инструменты, непригодные для эфемерного side-chat /btw:
 //  - task: спавнит реальную дочернюю сессию (пишет SessionTable) — нарушает
 //    эфемерность btw.
@@ -497,9 +495,10 @@ const runTurn = (state: BtwState, queue: Queue.Queue<BtwPart, Cause.Done>) =>
 // последние кадры) и финализирует interrupt'ом, клиент не получает ответа.
 const runLoop = (state: BtwState, queue: Queue.Queue<BtwPart, Cause.Done>) =>
   Effect.gen(function* () {
+    const maxTurns = state.agent.steps ?? Infinity
     let guard = 0
     let result: "continue" | "stop" = "continue"
-    while (result === "continue" && guard++ < MAX_TURNS && !state.closed) {
+    while (result === "continue" && guard++ < maxTurns && !state.closed) {
       result = yield* runTurn(state, queue).pipe(
         Effect.catchCause((cause) =>
           Effect.gen(function* () {
@@ -512,11 +511,10 @@ const runLoop = (state: BtwState, queue: Queue.Queue<BtwPart, Cause.Done>) =>
     }
     yield* Queue.offer(queue, { type: "turn-end" })
   }).pipe(
-    // Серверный wall-clock таймаут тура убран намеренно: основная сессия opencode
-    // его не имеет, и 120s обрывали легитимно долгие ответы (plan-агент). Runaway
-    // ту́ловых циклов ограничен MAX_TURNS=50; тихое зависание провайдера ловит
-    // клиентский inactivity (135s без текста / 20s после текста) — серверный
-    // таймаут при uninterruptible-стриме всё равно не срабатывал.
+    // Серверный wall-clock таймаут тура убран: основная сессия opencode его не
+    // имеет, и 120s обрывали легитимно долгие ответы. Лимит шагов берётся из
+    // унаследованного агента (state.agent.steps ?? Infinity) — ровно как в
+    // основной сессии (prompt.ts: maxSteps = agent.steps ?? Infinity).
     Effect.ensuring(
       Effect.gen(function* () {
         state.busy = false

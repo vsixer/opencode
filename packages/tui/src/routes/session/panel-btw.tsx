@@ -246,41 +246,15 @@ export function BtwPanel(props: { parentID: string; width: number }) {
     setMessages((m) => [...m, { role: "user", id: "u" + Date.now(), text }])
     const assistantId = appendAssistant()
     pendingPatch = { text: "", reasoning: "", tools: [] }
-    // Per-turn abort (component-scope): связывает panel-level abort и
-    // inactivity-timeout. Отдельный hard-cap убран: он preempt'ил серверный
-    // 120s timeout (runLoop), не давая дойти до его {type:"error"} кадра и
-    // порождая пустой сброс. Сервер — авторитет по завершению тура; inactivity
-    // (135s) стоит выше серверского 120s и ловит только подлинно мёртвый
-    // транспорт (нет даже терминального кадра).
+    // Per-turn abort связывает только panel-level abort (размонтирование панели)
+    // и ручной аборт пользователя. Никаких клиентских таймаутов/inactivity нет —
+    // как в основной сессии: модель работает сколько нужно, а зависший провайдер
+    // пользователь прерывает сам (interrupt-клавиша). Серверский лимит шагов
+    // берётся из унаследованного агента (state.agent.steps ?? Infinity).
     turnAbort = new AbortController()
     const onPanelAbort = () => turnAbort?.abort()
     abort.signal.addEventListener("abort", onPanelAbort)
-    let inactiveTimedOut = false
-    // Два режима провала транспорта. Когда ответный текст уже получен,
-    // зависание провайдера (zai-coding-plan/glm-5.2 рвёт соединение mid-stream
-    // после текста) не должно пугать пользователя ошибкой — ответ ведь есть.
-    // Поэтому после текста inactivity короткий (20s): по истечении клиент
-    // финализирует тур без ошибки, просто снимая спиннер, а локальный аборт рвёт
-    // SSE-соединение, закрывает серверный scope и чистит зависший runLoop. Без
-    // текста — длинный (135s > серверского 120s), чтобы сервер успел доставить
-    // свой терминальный кадр «btw: timed out» через EOF-flush.
-    let answerTextSeen = false
-    const stallDelay = () => (answerTextSeen ? 20_000 : 135_000)
-    let inactivityTimer: ReturnType<typeof setTimeout> | undefined = setTimeout(() => {
-      inactiveTimedOut = true
-      turnAbort?.abort()
-    }, stallDelay())
-    const resetInactivity = () => {
-      if (inactivityTimer) clearTimeout(inactivityTimer)
-      inactivityTimer = setTimeout(() => {
-        inactiveTimedOut = true
-        turnAbort?.abort()
-      }, stallDelay())
-    }
     const classifyAbort = (): string | undefined => {
-      // Текст получен → финализируем без ошибки (ответ есть, провайдер лишь не
-      // закрыл поток чисто). Без текста → подлинный «stalled».
-      if (inactiveTimedOut) return answerTextSeen ? undefined : "btw: stalled (no data in 135s)"
       if (userAborted) return "btw: aborted"
       if (abort.signal.aborted) return "btw: connection lost"
       return undefined
@@ -295,8 +269,6 @@ export function BtwPanel(props: { parentID: string; width: number }) {
       for await (const raw of resp.stream) {
         if (turnAbort?.signal.aborted) break
         const part = raw as unknown as BtwChunk
-        if (part.type === "text-delta") answerTextSeen = true
-        resetInactivity()
         handlePart(part, assistantId)
         streamChunkCount++
         if (streamChunkCount % FLUSH_EVERY === 0) {
@@ -320,11 +292,8 @@ export function BtwPanel(props: { parentID: string; width: number }) {
       // его в 0, когда busy опускается.
       const turnDuration = elapsed()
       finalizeAssistant(assistantId, turnDuration)
-      // Свой собственный таймер (inactivity) отменяет SSE-читатель через
-      // reader.cancel() → стрим завершается чистым EOF без throw, catch выше
-      // не срабатывает. Без этой ветки панель сбрасывается в пустоту:
-      // spinner гаснет, ошибки нет, reasoning свёрнут — ровно тот «пустой
-      // обрыв», что наблюдался у plan-агента в 6-туровом цикле (run 3437a807).
+      // Если стрим завершился нештатно (без turn-end) и без явной ошибки —
+      // классифицируем обрыв (user-abort / connection-lost при размонтировании).
       if (!terminated && !error()) {
         const msg = classifyAbort()
         if (msg) {
@@ -332,7 +301,6 @@ export function BtwPanel(props: { parentID: string; width: number }) {
           surfaceReasoningOnFailure(assistantId)
         }
       }
-      if (inactivityTimer) clearTimeout(inactivityTimer)
       abort.signal.removeEventListener("abort", onPanelAbort)
       turnAbort = null
       setBusy(false)
