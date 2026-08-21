@@ -57,22 +57,26 @@ export const Definitions = {
   command_list: keybind("ctrl+p", "List available commands"),
   help_show: keybind("none", "Open help dialog"),
   docs_open: keybind("none", "Open documentation"),
-  diff_open: keybind("none", "Open diff viewer"),
+  diff_open: keybind("<leader>d", "Open diff viewer"),
   diff_close: keybind("escape,q", "Close diff viewer"),
-  diff_toggle: keybind("enter,space", "Toggle diff viewer item"),
+  diff_toggle: keybind("space", "Toggle diff viewer item"),
   diff_expand: keybind("right", "Expand diff viewer item"),
   diff_expand_all: keybind("E", "Expand all diff viewer folders"),
   diff_collapse: keybind("left", "Collapse diff viewer item"),
   diff_switch_focus: keybind("tab", "Switch diff viewer focus"),
-  diff_next_hunk: keybind("]", "Jump to next diff hunk"),
-  diff_previous_hunk: keybind("[", "Jump to previous diff hunk"),
+  diff_next_hunk: keybind("[", "Jump to next diff hunk"),
+  diff_previous_hunk: keybind("]", "Jump to previous diff hunk"),
   diff_next_file: keybind("n", "Jump to next diff file"),
-  diff_previous_file: keybind("p", "Jump to previous diff file"),
+  diff_previous_file: keybind("N", "Jump to previous diff file"),
   diff_toggle_file_tree: keybind("b", "Toggle diff viewer file tree"),
   diff_single_patch: keybind("s", "Toggle single patch view"),
-  diff_switch_source: keybind("d", "Switch diff viewer source"),
+  diff_switch_source: keybind("o", "Switch diff viewer source"),
   diff_toggle_view: keybind("v", "Toggle diff viewer split or unified view"),
+  diff_compact_toggle: keybind("c", "Toggle compact diff view"),
   diff_help: keybind("?", "Show more diff viewer shortcuts"),
+  diff_annotate: keybind("return", "Annotate diff line"),
+  diff_annotate_delete: keybind("d", "Delete annotation on line"),
+  diff_annotations_panel: keybind("a", "Toggle annotations panel"),
 
   editor_open: keybind("<leader>e", "Open external editor"),
   theme_list: keybind("<leader>t", "List available themes"),
@@ -244,6 +248,11 @@ export const Definitions = {
 type KeybindName = keyof typeof Definitions
 const KeybindNames = new Set<string>(Object.keys(Definitions))
 
+// Инертные данные миграции (FR-D9): биндинги, удалённые из Definitions, но ещё
+// встречающиеся в конфигах пользователей. Игнорируются с предупреждением; прочие
+// неизвестные имена — прежний fail-fast throw.
+const DeprecatedKeybinds = new Set<string>(["diffann_open"])
+
 export const KeybindOverrides = Schema.Struct(
   Object.fromEntries(
     Object.entries(Definitions).map(([name, item]) => [
@@ -283,7 +292,11 @@ export const CommandMap = {
   diff_single_patch: "diff.single_patch",
   diff_switch_source: "diff.switch_source",
   diff_toggle_view: "diff.toggle_view",
+  diff_compact_toggle: "diff.compact_toggle",
   diff_help: "diff.help",
+  diff_annotate: "diff.annotate",
+  diff_annotate_delete: "diff.annotate_delete",
+  diff_annotations_panel: "diff.annotations_panel",
   editor_open: "prompt.editor",
   theme_list: "theme.switch",
   theme_switch_mode: "theme.switch_mode",
@@ -451,6 +464,11 @@ export function defaultValue(name: KeybindName) {
 }
 
 export function parse(keybinds: KeybindOverrides): Keybinds {
+  for (const key of Object.keys(keybinds)) {
+    if (DeprecatedKeybinds.has(key)) {
+      console.warn(`Ignoring deprecated keybind "${key}": the feature it referenced was removed.`)
+    }
+  }
   const invalid = unknownKeys(keybinds)
   if (invalid.length) throw new Error(`Unrecognized keybind${invalid.length === 1 ? "" : "s"}: ${invalid.join(", ")}`)
   return Object.fromEntries(
@@ -464,7 +482,7 @@ export function parse(keybinds: KeybindOverrides): Keybinds {
 export const Keybinds = { parse }
 
 export function unknownKeys(input: object) {
-  return Object.keys(input).filter((key) => !KeybindNames.has(key))
+  return Object.keys(input).filter((key) => !KeybindNames.has(key) && !DeprecatedKeybinds.has(key))
 }
 
 export function bindingDefaults(): BindingDefaults<Renderable, KeyEvent> {

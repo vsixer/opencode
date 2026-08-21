@@ -11,11 +11,18 @@ import {
 import { LANGUAGE_EXTENSIONS } from "../../util/filetype"
 import { useBindings, useCommandShortcut } from "../../keymap"
 import { useTheme } from "../../context/theme"
-import { useTerminalDimensions } from "@opentui/solid"
+import { useRenderer, useTerminalDimensions } from "@opentui/solid"
 import path from "path"
 import { createEffect, createMemo, createResource, createSignal, For, Match, onCleanup, Show, Switch } from "solid-js"
 import { DiffViewerFileTree } from "./diff-viewer-file-tree"
-import { Panel, PanelGroup, Separator } from "./diff-viewer-ui"
+import { Panel, PanelGroup, Separator, helpKeyColumnWidth } from "./diff-viewer-ui"
+import { createDiffAnnotations } from "./diff-viewer-annotations/integration"
+import { compactPatchText } from "./diff-viewer-annotations/compact-visibility"
+import { gotoFileTarget, gotoTransition } from "./diff-viewer-annotations/goto"
+import type { DiffFile } from "./diff-viewer-annotations/patch-lines"
+import { quarterViewport } from "./diff-viewer-annotations/patch-cursor"
+import { resolveEditableFile } from "./diff-viewer-annotations/editor-target"
+import { openFileInEditor } from "../../editor"
 import { DialogSelect } from "../../ui/dialog-select"
 import { getScrollAcceleration } from "../../util/scroll"
 import {
@@ -48,13 +55,9 @@ type DiffViewerFocus = "patches" | "files"
 type DiffView = "split" | "unified"
 type SelectedHunk = { readonly fileIndex: number; readonly hunkIndex: number; readonly scrollTop: number }
 
-type DiffFile = {
-  readonly file: string
-  readonly patch?: string
-  readonly additions: number
-  readonly deletions: number
-  readonly status: "added" | "deleted" | "modified"
-}
+// Компактный режим включается при каждом открытии viewer, но переживает внутреннюю
+// смену источника («o»): ручка живёт между монтированиями компонента маршрута.
+let compactOnOpen = true
 
 const normalizeDiffs = (diffs: readonly (VcsFileDiff | SnapshotFileDiff)[]): DiffFile[] =>
   diffs.flatMap((item) =>
@@ -90,6 +93,7 @@ function diffSourceLabel(mode: DiffMode) {
 
 function DiffViewer(props: { api: TuiPluginApi }) {
   const dimensions = useTerminalDimensions()
+  const renderer = useRenderer()
   const themeState = useTheme()
   const theme = () => props.api.theme.current
   const params = () =>
@@ -154,12 +158,30 @@ function DiffViewer(props: { api: TuiPluginApi }) {
   const patchScrollAcceleration = createMemo(() => getScrollAcceleration(props.api.tuiConfig))
   const fileRows = createMemo(() => flattenFileTree(fileTree(), expandedFileNodes()))
   const patchFileIndexes = createMemo(() => orderedPatchFileIndexes(flattenFileTree(fileTree())))
+  // Стабильная 1-based нумерация строк-файлов: позиция в полном плоском порядке
+  // (без expandedFileNodes) — сворачивание каталогов номера не меняет.
+  const fileNumberByNodeId = createMemo(() => {
+    const numbers = new Map<number, number>()
+    let number = 0
+    for (const row of flattenFileTree(fileTree())) {
+      if (row.fileIndex === undefined) continue
+      number += 1
+      numbers.set(row.id, number)
+    }
+    return numbers
+  })
+  // Буфер goto-файла живёт во владельце дерева/фокуса; активен только в фокусе
+  // дерева (взаимоисключение с goto-строкой, живущей в фокусе патчей).
+  const [gotoFileBuffer, setGotoFileBuffer] = createSignal<string | undefined>(undefined)
   const focusRunner = (input: Record<DiffViewerFocus, () => void>) => () => input[focus()]()
   const switchFocusShortcut = useCommandShortcut("diff.switch_focus")
   const nextHunkShortcut = useCommandShortcut("diff.next_hunk")
   const previousHunkShortcut = useCommandShortcut("diff.previous_hunk")
   const nextFileShortcut = useCommandShortcut("diff.next_file")
   const previousFileShortcut = useCommandShortcut("diff.previous_file")
+  const scrollDownShortcut = useCommandShortcut("diff.scroll.down")
+  const scrollUpShortcut = useCommandShortcut("diff.scroll.up")
+  const openFileShortcut = useCommandShortcut("diff.open_file")
   const toggleFileTreeShortcut = useCommandShortcut("diff.toggle_file_tree")
   const singlePatchShortcut = useCommandShortcut("diff.single_patch")
   const switchSourceShortcut = useCommandShortcut("diff.switch_source")
@@ -172,6 +194,13 @@ function DiffViewer(props: { api: TuiPluginApi }) {
   const [selectedHunk, setSelectedHunk] = createSignal<SelectedHunk | undefined>()
   const [pendingPatchScrollFileIndex, setPendingPatchScrollFileIndex] = createSignal<number | undefined>()
   const [patchFillerHeight, setPatchFillerHeight] = createSignal(0)
+  const [compact, setCompact] = createSignal(compactOnOpen)
+  // Кэш трансформации patch-текста: пересчёт только при смене файла/текста.
+  const compactCache = new Map<number, { readonly patch: string | undefined; readonly result: string | undefined }>()
+  createEffect(() => {
+    visiblePatchFiles()
+    compactCache.clear()
+  })
 
   onCleanup(() => props.api.ui.dialog.clear())
 
@@ -248,6 +277,8 @@ function DiffViewer(props: { api: TuiPluginApi }) {
     if (fileIndex === undefined) return
     setSelectedHunk(undefined)
     scrollToFileIndex(fileIndex)
+    // FR-4: выбор файла в дереве синхронизирует курсор аннотирования (AC-9).
+    annotations.setCursorToFileRow(fileIndex, 0)
   }
 
   const currentPatchFileIndex = () => {
@@ -269,14 +300,27 @@ function DiffViewer(props: { api: TuiPluginApi }) {
 
   const jumpRelativePatchFile = (offset: number) => {
     setSelectedHunk(undefined)
-    const next = movePatchFileIndex(patchFileIndexes(), selectedFileIndex() ?? activePatchFileIndex(), offset)
-    if (singlePatch()) {
+    const indexes = patchFileIndexes()
+    let current = selectedFileIndex() ?? activePatchFileIndex()
+    let next: number | undefined
+    // Файлы без контентных строк (binary) пропускаются; потолок защищает от
+    // зацикливания, когда кандидатов нет вовсе.
+    for (let attempt = 0; attempt <= indexes.length; attempt++) {
+      next = movePatchFileIndex(indexes, current, offset)
       if (next === undefined) return
+      if (annotations.firstNavigableIndexOfFile(next) !== undefined) break
+      current = next
+    }
+    if (next === undefined || annotations.firstNavigableIndexOfFile(next) === undefined) return
+    if (singlePatch()) {
       selectPatchFile(next)
       scrollSinglePatchToTop()
+      annotations.setCursorToFileRow(next, 0)
       return
     }
     scrollToFileIndex(next)
+    // Курсор садится на первую контентную строку файла, не на заголовок.
+    annotations.setCursorToFileRow(next, 0)
   }
 
   const jumpRelativeHunk = (offset: -1 | 1) => {
@@ -293,6 +337,7 @@ function DiffViewer(props: { api: TuiPluginApi }) {
           .map((row, hunkIndex) => ({
             fileIndex: entry.fileIndex,
             hunkIndex,
+            row,
             contentY: contentY + row,
           }))
       })
@@ -311,6 +356,11 @@ function DiffViewer(props: { api: TuiPluginApi }) {
     if (!next) return
     selectPatchFile(next.fileIndex)
     patchScroll.scrollTo(next.contentY)
+    // Курсор садится на первую контентную строку ханка, а не на «@@».
+    const lines = diffNodeByFileIndex.get(next.fileIndex)?.diff.split("\n") ?? []
+    let row = next.row + 1
+    while (row < lines.length && (lines[row].startsWith("\\") || lines[row].startsWith("@@"))) row++
+    annotations.setCursorToFileRow(next.fileIndex, row)
     setSelectedHunk({ fileIndex: next.fileIndex, hunkIndex: next.hunkIndex, scrollTop: patchScroll.scrollTop })
   }
 
@@ -331,6 +381,20 @@ function DiffViewer(props: { api: TuiPluginApi }) {
     )
     const file = fileIndex === undefined ? undefined : files()[fileIndex]
     return file && fileIndex !== undefined ? [{ file, fileIndex }] : []
+  })
+
+  // Рендер и модель навигации строятся из одного трансформированного текста:
+  // компакт-режим вырезает строки до рендера, якоря сохраняют номера (D2).
+  const renderedPatchFiles = createMemo(() => {
+    const visible = visiblePatchFiles()
+    if (!compact()) return visible
+    return visible.map((entry) => {
+      const cached = compactCache.get(entry.fileIndex)
+      if (cached && cached.patch === entry.file.patch) return { file: { ...entry.file, patch: cached.result }, fileIndex: entry.fileIndex }
+      const result = compactPatchText(entry.file.patch)
+      compactCache.set(entry.fileIndex, { patch: entry.file.patch, result })
+      return { file: { ...entry.file, patch: result }, fileIndex: entry.fileIndex }
+    })
   })
 
   const ensureHighlightedPatchFile = () => {
@@ -405,6 +469,18 @@ function DiffViewer(props: { api: TuiPluginApi }) {
     setExpandedFileNodes((expanded) => toggleFileTreeDirectory(fileTree(), expanded, highlightedFileNode()))
   }
 
+  // Enter в дереве: файл — показать и перевести фокус в патчи; папка — toggle
+  // с сохранением фокуса в дереве (FR-3.1–3.3).
+  const activateFileTreeRow = () => {
+    const highlighted = fileRows().find((row) => row.id === highlightedFileNode())
+    if (highlighted?.fileIndex !== undefined) {
+      jumpToFileIndex(highlighted.fileIndex)
+      setFocus("patches")
+      return
+    }
+    setExpandedFileNodes((expanded) => toggleFileTreeDirectory(fileTree(), expanded, highlightedFileNode()))
+  }
+
   const clickFileTreeRow = (row: FileTreeRow) => {
     setFocus("files")
     setHighlighted(row.id)
@@ -430,19 +506,116 @@ function DiffViewer(props: { api: TuiPluginApi }) {
     })
   }
 
+  const closeViewer = () => {
+    const returnRoute = params()?.returnRoute
+    props.api.ui.dialog.clear()
+
+    props.api.route.navigate(
+      returnRoute?.name ?? "home",
+      returnRoute && "params" in returnRoute ? returnRoute.params : undefined,
+    )
+  }
+
+  // Аннотирование — поведение viewer поверх неизменного рендера патча (FR-I1):
+  // курсор, статус-бар, оверлеи, черновик по сессии-владельцу.
+  const annotations = createDiffAnnotations({
+    api: props.api,
+    params,
+    files,
+    diffReady: () => !diff.loading && !diff.error && files().length > 0,
+    focus,
+    focusPatches: () => setFocus("patches"),
+    activateFileTreeRow,
+    compact,
+    setCompact: (value: boolean) => {
+      compactOnOpen = value
+      setCompact(value)
+    },
+    visiblePatchFiles: renderedPatchFiles,
+    getScroll: () => scroll,
+    patchNodeByFileIndex,
+    diffNodeByFileIndex,
+    patchPaneWidth,
+    view,
+    reviewedFileNames,
+    closeViewer,
+  })
+
+  // Goto-файл: семантика зеркальна goto-строке — та же чистая машина
+  // состояний, другой resolver цели и гейт по фокусу дерева. Условия
+  // допустимости — единая точка: гейты слоёв и эффект сброса не расходятся.
+  const gotoFileDigits = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]
+  const gotoFileAllowed = () =>
+    focus() === "files" &&
+    showFileTree() &&
+    !diff.loading &&
+    !diff.error &&
+    files().length > 0 &&
+    !annotations.overlayActive()
+
+  // Сброс буфера при нарушении любого условия допустимости (FR-1.7); смена
+  // состава файлов отслеживается через fileTree. Возврат фокуса старый буфер
+  // не восстанавливает.
+  createEffect(() => {
+    fileTree()
+    if (!gotoFileAllowed()) setGotoFileBuffer(undefined)
+  })
+
+  function applyGotoFile(event: Parameters<typeof gotoTransition>[1]) {
+    const result = gotoTransition(gotoFileBuffer(), event)
+    setGotoFileBuffer(result.buffer)
+    if (result.committed === undefined) return
+    const target = gotoFileTarget(result.committed, patchFileIndexes().length)
+    // Невалидный номер — тихий сброс: буфер уже очищен, состояние не меняется.
+    if (target === undefined) return
+    jumpToFileIndex(patchFileIndexes()[target])
+    setFocus("patches")
+  }
+
+  useBindings(() => ({
+    enabled: gotoFileAllowed() && gotoFileBuffer() === undefined,
+    commands: gotoFileDigits.map((digit) => ({
+      name: `diff.gotofile.digit.${digit}`,
+      run: () => applyGotoFile({ kind: "digit", digit }),
+    })),
+    bindings: gotoFileDigits.map((digit) => ({ key: digit, cmd: `diff.gotofile.digit.${digit}`, desc: "Goto file" })),
+  }))
+
+  useBindings(() => ({
+    enabled: gotoFileAllowed() && gotoFileBuffer() !== undefined,
+    priority: 2,
+    commands: [
+      ...gotoFileDigits.map((digit) => ({
+        name: `diff.gotofile.append.${digit}`,
+        run: () => applyGotoFile({ kind: "digit", digit }),
+      })),
+      { name: "diff.gotofile.commit", run: () => applyGotoFile({ kind: "enter" }) },
+      { name: "diff.gotofile.cancel", run: () => applyGotoFile({ kind: "escape" }) },
+      { name: "diff.gotofile.backspace", run: () => applyGotoFile({ kind: "backspace" }) },
+      { name: "diff.gotofile.tab", run: () => applyGotoFile({ kind: "tab" }) },
+    ],
+    bindings: [
+      ...gotoFileDigits.map((digit) => ({ key: digit, cmd: `diff.gotofile.append.${digit}` })),
+      { key: "return", cmd: "diff.gotofile.commit" },
+      { key: "escape", cmd: "diff.gotofile.cancel" },
+      { key: "backspace", cmd: "diff.gotofile.backspace" },
+      { key: "tab", cmd: "diff.gotofile.tab", fallthrough: true },
+      {
+        key: "j,down,k,up,n,N,J,K,e,],[,b,s,o,v,m,E,q,a,d,c,g,?,space,right,left,pageup,pagedown,ctrl+f,ctrl+b",
+        cmd: "diff.gotofile.cancel",
+      },
+    ],
+  }))
+
   const commands = [
     {
       name: "diff.close",
       title: "Close diff viewer",
       category: "VCS",
       run() {
-        const returnRoute = params()?.returnRoute
-        props.api.ui.dialog.clear()
-
-        props.api.route.navigate(
-          returnRoute?.name ?? "home",
-          returnRoute && "params" in returnRoute ? returnRoute.params : undefined,
-        )
+        // При живом черновике — диалог выхода (FR-X1), иначе обычное закрытие (FR-X2).
+        if (annotations.handleClose()) return
+        closeViewer()
       },
     },
     {
@@ -455,7 +628,9 @@ function DiffViewer(props: { api: TuiPluginApi }) {
         },
         patches() {
           clearFileTreePatchState()
-          scroll?.scrollBy(1)
+          // j/k двигают курсор ровно на одну видимую строку (FR-I4/I5).
+          if (annotations.cursorActive()) annotations.moveCursor(1)
+          else scroll?.scrollBy(1)
         },
       }),
     },
@@ -469,7 +644,8 @@ function DiffViewer(props: { api: TuiPluginApi }) {
         },
         patches() {
           clearFileTreePatchState()
-          scroll?.scrollBy(-1)
+          if (annotations.cursorActive()) annotations.moveCursor(-1)
+          else scroll?.scrollBy(-1)
         },
       }),
     },
@@ -483,7 +659,8 @@ function DiffViewer(props: { api: TuiPluginApi }) {
         },
         patches() {
           clearFileTreePatchState()
-          if (scroll) scroll.scrollBy(scroll.height)
+          if (annotations.cursorActive()) annotations.pageCursor(1)
+          else if (scroll) scroll.scrollBy(scroll.height)
         },
       }),
     },
@@ -497,7 +674,38 @@ function DiffViewer(props: { api: TuiPluginApi }) {
         },
         patches() {
           clearFileTreePatchState()
-          if (scroll) scroll.scrollBy(-scroll.height)
+          if (annotations.cursorActive()) annotations.pageCursor(-1)
+          else if (scroll) scroll.scrollBy(-scroll.height)
+        },
+      }),
+    },
+    {
+      name: "diff.scroll.down",
+      title: "Scroll diff viewer down (quarter)",
+      category: "VCS",
+      run: focusRunner({
+        files() {
+          moveFileSelection(2)
+        },
+        patches() {
+          clearFileTreePatchState()
+          if (annotations.cursorActive()) annotations.quarterCursor(1)
+          else if (scroll) scroll.scrollBy(quarterViewport(scroll.viewport.height))
+        },
+      }),
+    },
+    {
+      name: "diff.scroll.up",
+      title: "Scroll diff viewer up (quarter)",
+      category: "VCS",
+      run: focusRunner({
+        files() {
+          moveFileSelection(-2)
+        },
+        patches() {
+          clearFileTreePatchState()
+          if (annotations.cursorActive()) annotations.quarterCursor(-1)
+          else if (scroll) scroll.scrollBy(-quarterViewport(scroll.viewport.height))
         },
       }),
     },
@@ -593,6 +801,32 @@ function DiffViewer(props: { api: TuiPluginApi }) {
       },
     },
     {
+      name: "diff.open_file",
+      title: "Open diff file in external editor",
+      category: "VCS",
+      async run() {
+        // Курсор на строке → её файл и номер (FR-10 best-effort, включая minus-строки
+        // со старым номером — карта старая→новая не строится); иначе первый видимый файл.
+        const line = annotations.currentLine()
+        const file = line ? files().find((item) => item.file === line.filePath) : renderedPatchFiles()[0]?.file
+        if (!file) return
+        const resolved = resolveEditableFile({ file: file.file, patch: file.patch, cwd: process.cwd() })
+        if ("missing" in resolved) {
+          props.api.ui.toast({ variant: "error", title: "File not found", message: file.file })
+          return
+        }
+        const status = await openFileInEditor({
+          file: resolved.path,
+          line: line?.lineNumber ?? undefined,
+          renderer,
+          cwd: process.cwd(),
+        })
+        if (status === "no-editor") {
+          props.api.ui.toast({ variant: "error", title: "No external editor", message: "Set VISUAL or EDITOR" })
+        }
+      },
+    },
+    {
       name: "diff.mark_reviewed",
       title: "Toggle selected diff file reviewed",
       category: "VCS",
@@ -672,6 +906,15 @@ function DiffViewer(props: { api: TuiPluginApi }) {
       },
     },
     {
+      name: "diff.compact_toggle",
+      title: "Toggle compact diff view",
+      category: "VCS",
+      run() {
+        if (focus() !== "patches") return
+        annotations.toggleCompact()
+      },
+    },
+    {
       name: "diff.help",
       title: "Show more diff viewer shortcuts",
       category: "VCS",
@@ -679,6 +922,7 @@ function DiffViewer(props: { api: TuiPluginApi }) {
         openHelpDialog()
       },
     },
+    ...annotations.commands,
   ]
 
   const switchDiffOptions = createMemo(() => {
@@ -717,11 +961,15 @@ function DiffViewer(props: { api: TuiPluginApi }) {
           ...option,
           onSelect(dialog) {
             dialog.clear()
-            props.api.route.navigate(ROUTE, {
-              mode: option.value,
-              sessionID: params()?.sessionID,
-              messageID: params()?.messageID,
-              returnRoute: params()?.returnRoute,
+            // Смена/обновление источника при живом черновике — только через
+            // подтверждение (FR-S3/S4); отказ ничего не меняет.
+            annotations.confirmSourceSwitch(() => {
+              props.api.route.navigate(ROUTE, {
+                mode: option.value,
+                sessionID: params()?.sessionID,
+                messageID: params()?.messageID,
+                returnRoute: params()?.returnRoute,
+              })
             })
           },
         }))}
@@ -735,12 +983,18 @@ function DiffViewer(props: { api: TuiPluginApi }) {
   }
 
   useBindings(() => ({
+    // FR-K8: открытый оверлей глушит клавиши viewer. Диалоги api.ui.dialog имеют
+    // собственные слои (поведение до фичи сохранено, FR-R1).
+    enabled: !annotations.overlayActive(),
     commands,
     bindings: [
       { key: "j,down", cmd: "diff.down", desc: "Move diff viewer down" },
       { key: "k,up", cmd: "diff.up", desc: "Move diff viewer up" },
       { key: "pagedown,ctrl+f", cmd: "diff.page.down", desc: "Page diff viewer down" },
       { key: "pageup,ctrl+b", cmd: "diff.page.up", desc: "Page diff viewer up" },
+      { key: "J", cmd: "diff.scroll.down", desc: "Scroll diff viewer down (quarter)" },
+      { key: "K", cmd: "diff.scroll.up", desc: "Scroll diff viewer up (quarter)" },
+      { key: "e", cmd: "diff.open_file", desc: "Open file in external editor" },
       { key: "m", cmd: "diff.mark_reviewed", desc: "Mark selected file reviewed" },
       ...props.api.tuiConfig.keybinds.gather(
         "diff",
@@ -795,6 +1049,7 @@ function DiffViewer(props: { api: TuiPluginApi }) {
                     selectedFileIndex={selectedFileIndex()}
                     reviewedFileNames={reviewedFileNames()}
                     expandedNodes={expandedFileNodes()}
+                    fileNumberByNodeId={fileNumberByNodeId()}
                     onRowClick={clickFileTreeRow}
                   />
                 </Show>
@@ -809,7 +1064,7 @@ function DiffViewer(props: { api: TuiPluginApi }) {
                     verticalScrollbarOptions={{ visible: false }}
                     horizontalScrollbarOptions={{ visible: false }}
                   >
-                    <For each={visiblePatchFiles()}>
+                    <For each={renderedPatchFiles()}>
                       {(entry, index) => {
                         const reviewed = () => reviewedFileNames().has(entry.file.file)
                         return (
@@ -881,6 +1136,25 @@ function DiffViewer(props: { api: TuiPluginApi }) {
         </box>
 
         <Panel flexShrink={0} gap={2} paddingLeft={1} border="none">
+          {/* wrapMode/width: без них двухзначный буфер переносится по символам
+              (тот же латентный класс бага, что и у статус-номера строки). */}
+          <Show when={gotoFileBuffer()}>
+            {(buffer) => (
+              <text fg={theme().text} wrapMode="none" width={11 + buffer().length}>
+                goto file: {buffer()}
+              </text>
+            )}
+          </Show>
+          <Show when={annotations.statusText()}>
+            {(status) => (
+              // FR-2: голый номер текущей строки — без пути, счётчика и метки.
+              // wrapMode="none": без него двухзначные номера переносятся по
+              // символам на строки футера (латентный баг, вскрыт quarter-скроллом).
+              <text fg={theme().text} wrapMode="none" width={status().length}>
+                {status()}
+              </text>
+            )}
+          </Show>
           <Show when={switchFocusShortcut()}>
             {(shortcut) => (
               <text fg={theme().text}>
@@ -916,6 +1190,24 @@ function DiffViewer(props: { api: TuiPluginApi }) {
               </text>
             )}
           </Show>
+          {/* Новые подсказки скролла/редактора выключаются на низких терминалах:
+              третья строка футера выталкивает контент патча (деградация TC-Q702). */}
+          <Show when={dimensions().height > 16}>
+            <Show when={scrollDownShortcut()}>
+              {(shortcut) => (
+                <text fg={theme().text}>
+                  {shortcut()}/{scrollUpShortcut()} <span style={{ fg: theme().textMuted }}>scroll</span>
+                </text>
+              )}
+            </Show>
+            <Show when={openFileShortcut()}>
+              {(shortcut) => (
+                <text fg={theme().text}>
+                  {shortcut()} <span style={{ fg: theme().textMuted }}>open file</span>
+                </text>
+              )}
+            </Show>
+          </Show>
           <Show when={switchSourceShortcut()}>
             {(shortcut) => (
               <text fg={theme().text}>
@@ -939,6 +1231,7 @@ function DiffViewer(props: { api: TuiPluginApi }) {
           </Show>
         </Panel>
       </PanelGroup>
+      {annotations.overlays}
     </box>
   )
 }
@@ -950,6 +1243,11 @@ function DiffViewerHelpDialog() {
       shortcut: () => "q",
       action: "Close viewer",
       description: "Quit the diff viewer",
+    },
+    {
+      shortcut: useCommandShortcut("diff.open"),
+      action: "Open diff viewer",
+      description: "Open the diff viewer from anywhere",
     },
     {
       shortcut: useCommandShortcut("diff.switch_focus"),
@@ -975,6 +1273,21 @@ function DiffViewerHelpDialog() {
       shortcut: useCommandShortcut("diff.previous_file"),
       action: "Previous file",
       description: "Select the previous changed file in file-tree order",
+    },
+    {
+      shortcut: useCommandShortcut("diff.scroll.down"),
+      action: "Scroll down",
+      description: "Scroll the patch pane a quarter of the screen",
+    },
+    {
+      shortcut: useCommandShortcut("diff.scroll.up"),
+      action: "Scroll up",
+      description: "Scroll the patch pane a quarter of the screen up",
+    },
+    {
+      shortcut: useCommandShortcut("diff.open_file"),
+      action: "Open file",
+      description: "Open the current diff file in the external editor (VISUAL or EDITOR)",
     },
     {
       shortcut: useCommandShortcut("diff.toggle_file_tree"),
@@ -1006,7 +1319,45 @@ function DiffViewerHelpDialog() {
       action: "Mark reviewed",
       description: "Toggle reviewed state for the selected file",
     },
+    {
+      shortcut: useCommandShortcut("diff.toggle"),
+      action: "Toggle item",
+      description: "Toggle the selected file tree item",
+    },
+    {
+      shortcut: useCommandShortcut("diff.annotate"),
+      action: "Annotate line",
+      description: "Create or edit an annotation on the cursor line",
+    },
+    {
+      shortcut: useCommandShortcut("diff.annotate_delete"),
+      action: "Delete annotation",
+      description: "Delete the annotation on the cursor line with confirmation",
+    },
+    {
+      shortcut: useCommandShortcut("diff.annotations_panel"),
+      action: "Annotations panel",
+      description: "Toggle the annotations panel for the current draft",
+    },
+    {
+      shortcut: useCommandShortcut("diff.compact_toggle"),
+      action: "Compact view",
+      description: "Show only changed lines with nearby context",
+    },
+    {
+      shortcut: () => "0-9",
+      action: "Goto line",
+      description: "Type a new-file line number and press enter to jump",
+    },
+    {
+      shortcut: () => "alt+enter",
+      action: "Confirm annotation",
+      description: "Submit the annotation editor without inserting a newline",
+    },
   ]
+  // Колонка Key подстраивается под самый длинный биндинг (alt+enter), чтобы
+  // справка не превращалась в кашу на 80 колонках.
+  const keyWidth = helpKeyColumnWidth(rows.map((row) => row.shortcut() || "-"))
 
   return (
     <box paddingLeft={2} paddingRight={2} paddingBottom={1} gap={1}>
@@ -1017,7 +1368,7 @@ function DiffViewerHelpDialog() {
         <text fg={theme.textMuted}>esc</text>
       </box>
       <box flexDirection="row">
-        <text fg={theme.textMuted} width={5} wrapMode="none">
+        <text fg={theme.textMuted} width={keyWidth} wrapMode="none">
           Key
         </text>
         <text fg={theme.textMuted} width={22} wrapMode="none">
@@ -1028,7 +1379,7 @@ function DiffViewerHelpDialog() {
       <For each={rows}>
         {(row) => (
           <box flexDirection="row">
-            <text fg={theme.text} width={5} wrapMode="none">
+            <text fg={theme.text} width={keyWidth} wrapMode="none">
               {row.shortcut() || "-"}
             </text>
             <text fg={theme.text} width={22} wrapMode="none">
@@ -1059,6 +1410,12 @@ const tui: TuiPlugin = async (api) => {
         category: "VCS",
         namespace: "palette",
         run() {
+          // Идемпотент-гард: повторный вызов из diff-роута не перезаписывает
+          // returnRoute (иначе закрытие зацикливало бы возврат в diff).
+          if (api.route.current.name === ROUTE) return
+          // Каждое открытие viewer начинает с компактного вида; внутренние
+          // смены источника («o») это значение не сбрасывают.
+          compactOnOpen = true
           api.route.navigate(ROUTE, {
             mode: "git",
             sessionID: "params" in api.route.current ? api.route.current.params?.sessionID : undefined,

@@ -53,6 +53,38 @@ export async function openEditor(input: { value: string; renderer: CliRenderer; 
   }
 }
 
+// Открытие существующего файла в внешнем редакторе из среды (VISUAL || EDITOR).
+// Fire-and-forget: содержимое не возвращается, код выхода редактора не важен —
+// жизненный цикл рендера (suspend/resume) повторяет проверенный openEditor.
+export async function openFileInEditor(input: {
+  file: string
+  line?: number
+  renderer: CliRenderer
+  cwd?: string
+}): Promise<"opened" | "no-editor"> {
+  const editor = process.env.VISUAL || process.env.EDITOR
+  if (!editor) return "no-editor"
+  input.renderer.suspend()
+  input.renderer.currentRenderBuffer.clear()
+  try {
+    await new Promise<void>((resolve) => {
+      const parts = editor.split(" ")
+      const child = spawn(parts[0]!, [...parts.slice(1), ...(input.line ? [`+${input.line}`] : []), input.file], {
+        cwd: input.cwd && existsSync(input.cwd) ? input.cwd : process.cwd(),
+        stdio: "inherit",
+        shell: process.platform === "win32",
+      })
+      child.on("error", () => resolve())
+      child.on("exit", () => resolve())
+    })
+    return "opened"
+  } finally {
+    input.renderer.currentRenderBuffer.clear()
+    input.renderer.resume()
+    input.renderer.requestRender()
+  }
+}
+
 export function discoverEditorConnection(directory: string) {
   const root = path.join(os.homedir(), ".claude", "ide")
   const contains = (parent: string) => {

@@ -2,11 +2,12 @@
 import type { ColorInput, RGBA, ScrollBoxRenderable } from "@opentui/core"
 import { Locale } from "../../util/locale"
 import { tint } from "../../context/theme"
-import { createEffect, createMemo, For, Match, Switch } from "solid-js"
+import { createEffect, createMemo, For, Match, Show, Switch } from "solid-js"
 import { buildFileTree, flattenFileTree, type FileTreeItem, type FileTreeRow } from "./diff-viewer-file-tree-utils"
 import { Panel } from "./diff-viewer-ui"
 
 const FILE_TREE_STATUS_WIDTH = 2
+const FILE_TREE_NUMBER_GAP = 1
 
 export type DiffViewerFileTreeTheme = {
   readonly background: RGBA
@@ -31,6 +32,9 @@ export type DiffViewerFileTreeProps = {
   readonly selectedFileIndex?: number
   readonly reviewedFileNames?: ReadonlySet<string>
   readonly expandedNodes?: ReadonlySet<number>
+  // 1-based номера строк-файлов по id узла: стабильный плоский порядок файлов
+  // диффа, не зависит от сворачивания каталогов.
+  readonly fileNumberByNodeId?: ReadonlyMap<number, number>
   readonly onRowClick?: (row: FileTreeRow) => void
 }
 
@@ -75,9 +79,20 @@ export function DiffViewerFileTree(props: DiffViewerFileTreeProps) {
                   return file !== undefined && (props.reviewedFileNames?.has(file) ?? false)
                 }
                 const prefix = () => fileTreeRowPrefix(rows(), index(), row, props.expandedNodes)
+                const fileNumber = () => (row.fileIndex === undefined ? undefined : props.fileNumberByNodeId?.get(row.id))
+                const numberWidth = () => String(props.fileNumberByNodeId?.size ?? 0).length + FILE_TREE_NUMBER_GAP
                 const status = () => fileTreeRowStatus(row, props.files, reviewed())
                 const name = () =>
-                  Locale.truncate(row.name, Math.max(1, props.width - FILE_TREE_STATUS_WIDTH - prefix().length))
+                  Locale.truncate(
+                    row.name,
+                    Math.max(
+                      1,
+                      props.width -
+                        FILE_TREE_STATUS_WIDTH -
+                        prefix().length -
+                        (fileNumber() === undefined ? 0 : numberWidth()),
+                    ),
+                  )
                 return (
                   <box
                     flexDirection="row"
@@ -85,6 +100,17 @@ export function DiffViewerFileTree(props: DiffViewerFileTreeProps) {
                     backgroundColor={highlighted() ? props.theme.primary : undefined}
                     onMouseUp={() => props.onRowClick?.(row)}
                   >
+                    <Show when={props.fileNumberByNodeId !== undefined}>
+                      <text
+                        fg={highlighted() ? props.theme.background : props.theme.textMuted}
+                        wrapMode="none"
+                        flexShrink={0}
+                        width={numberWidth()}
+                        justifyContent="flex-end"
+                      >
+                        {fileNumber() ?? ""}
+                      </text>
+                    </Show>
                     <text fg={highlighted() ? props.theme.background : fadedColor()} wrapMode="none" flexShrink={0}>
                       {prefix()}
                     </text>

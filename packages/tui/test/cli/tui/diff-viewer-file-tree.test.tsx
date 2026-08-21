@@ -12,6 +12,7 @@ import { TestTuiContexts } from "../../fixture/tui-environment"
 import {
   allExpandedFileTreeDirectories,
   buildFileTree,
+  flattenFileTree,
 } from "../../../src/feature-plugins/system/diff-viewer-file-tree-utils"
 
 const theme = {
@@ -145,12 +146,145 @@ describe("DiffViewerFileTree", () => {
             error={undefined}
             theme={theme}
             expandedNodes={allExpandedFileTreeDirectories(tree)}
+            fileNumberByNodeId={fileNumbers(files)}
           />
         )),
       ),
-    ).toEqual(["▾ src/config", "│  └─ tui.ts                 ?"])
+    ).toEqual([" ▾ src/config", "1 │  └─ tui.ts               ?", "2 └─ README.md               ?"])
+  })
+
+  // Номер файла — единой колонкой в начале строки, перед префиксом; внутри
+  // колонки — выравнивание по правому краю (ширина по разрядности общего
+  // количества файлов).
+  test("multi-digit file numbers stay right-aligned in one leading column", async () => {
+    const files = Array.from({ length: 12 }, (_, i) => ({ file: `f${i}.ts` }))
+    const tree = buildFileTree(files)
+    const numbers = fileNumbers(files)
+    const app = await testRender(
+      () =>
+        withTheme(() => (
+          <DiffViewerFileTree
+            width={32}
+            files={files}
+            loading={false}
+            error={undefined}
+            theme={theme}
+            expandedNodes={allExpandedFileTreeDirectories(tree)}
+            fileNumberByNodeId={numbers}
+          />
+        )),
+      { width: 40, height: 16 },
+    )
+    let frame: string[]
+    try {
+      await renderOnceSettled(app)
+      frame = visibleLines(await captureSettledFrame(app))
+    } finally {
+      app.renderer.destroy()
+    }
+    // Однозначные номера выровнены по правому краю колонки (ширина по «12»):
+    // «1  ├─ …» и «10 ├─ …» — одна колонка перед префиксом.
+    expect(frame.some((line) => line.startsWith("1   f0.ts"))).toBe(true)
+    expect(frame.some((line) => line.startsWith("9  ├─ f6.ts"))).toBe(true)
+    expect(frame.some((line) => line.startsWith("10 ├─ f7.ts"))).toBe(true)
+    expect(frame.some((line) => line.startsWith("12 └─ f9.ts"))).toBe(true)
+  })
+
+  // TC-630 (FR-1.1/1.2): 1-based номера строк-файлов из плоского порядка
+  // patchFileIndexes; каталоги без номеров; сворачивание номера не меняет.
+  test("shows stable file numbers that survive directory collapsing (TC-630)", async () => {
+    const files = [
+      { file: "a/one.ts" },
+      { file: "a/two.ts" },
+      { file: "b/deep/three.ts" },
+      { file: "b/deep/four.ts" },
+      { file: "b/five.ts" },
+      { file: "top.ts" },
+      { file: "zz.ts" },
+    ]
+    const tree = buildFileTree(files)
+    const numbers = fileNumbers(files)
+    const collapsed = allExpandedFileTreeDirectories(tree)
+    const aDir = tree.nodes.find((node) => node.kind === "directory" && node.name === "a")!
+    collapsed.delete(aDir.id)
+
+    // Кадр выше дефолтного renderFrame: все 9 строк дерева должны быть видны.
+    const renderTall = async (expanded: ReadonlySet<number>) => {
+      const app = await testRender(
+        () =>
+          withTheme(() => (
+            <DiffViewerFileTree
+              width={32}
+              files={files}
+              loading={false}
+              error={undefined}
+              theme={theme}
+              expandedNodes={expanded}
+              fileNumberByNodeId={numbers}
+            />
+          )),
+        { width: 40, height: 16 },
+      )
+      try {
+        await renderOnceSettled(app)
+        return visibleLines(await captureSettledFrame(app))
+      } finally {
+        app.renderer.destroy()
+      }
+    }
+    const expandedFrame = await renderTall(allExpandedFileTreeDirectories(tree))
+    const collapsedFrame = await renderTall(collapsed)
+
+    // Файлы нумеруются по полному плоскому порядку (внутри каталога — по алфавиту),
+    // каталоги — без номеров.
+    expect(expandedFrame.some((line) => line.includes("one.ts") && line.includes("1"))).toBe(true)
+    expect(expandedFrame.some((line) => line.includes("two.ts") && line.includes("2"))).toBe(true)
+    expect(expandedFrame.some((line) => line.includes("four.ts") && line.includes("3"))).toBe(true)
+    expect(expandedFrame.some((line) => line.includes("five.ts") && line.includes("5"))).toBe(true)
+    expect(expandedFrame.some((line) => line.includes("top.ts") && line.includes("6"))).toBe(true)
+    // Строка-каталог номера не содержит
+    const dirRow = expandedFrame.find((line) => line.includes("▾ b"))!
+    expect(dirRow).toBeDefined()
+    expect(dirRow.replace(/[^\d]/g, "")).toBe("")
+    // Сворачивание «a» прячет one/two, но номера four/five/top не сдвинулись.
+    expect(collapsedFrame.some((line) => line.includes("one.ts"))).toBe(false)
+    expect(collapsedFrame.some((line) => line.includes("four.ts") && line.includes("3"))).toBe(true)
+    expect(collapsedFrame.some((line) => line.includes("top.ts") && line.includes("6"))).toBe(true)
+  })
+
+  test("renders no numbers when fileNumberByNodeId is absent", async () => {
+    const files = [{ file: "src/config/tui.ts" }, { file: "README.md" }]
+    const tree = buildFileTree(files)
+    const frame = visibleLines(
+      await renderFrame(() => (
+        <DiffViewerFileTree
+          width={32}
+          files={files}
+          loading={false}
+          error={undefined}
+          theme={theme}
+          expandedNodes={allExpandedFileTreeDirectories(tree)}
+        />
+      )),
+    )
+    expect(frame.some((line) => line.includes("tui.ts"))).toBe(true)
+    expect(frame.join("\n").replace(/[^\d]/g, "")).toBe("")
   })
 })
+
+// Плоский 1-based порядок файлов — тот же, из которого viewer строит
+// patchFileIndexes: flattenFileTree без expanded-набора.
+function fileNumbers(files: { file: string }[]) {
+  const numbers = new Map<number, number>()
+  const rows = flattenFileTree(buildFileTree(files))
+  let number = 0
+  for (const row of rows) {
+    if (row.fileIndex === undefined) continue
+    number += 1
+    numbers.set(row.id, number)
+  }
+  return numbers
+}
 
 async function renderFrame(component: () => JSX.Element) {
   const app = await testRender(() => withTheme(component), { width: 40, height: 10 })

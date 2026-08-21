@@ -68,8 +68,8 @@ test("brackets navigate diff hunks", async () => {
     const scroll = findScrollBox(viewer.app.renderer.root)!
     const initial = scroll.scrollTop
 
-    expect(TuiKeybind.defaultValue("diff_next_hunk")).toBe("]")
-    expect(TuiKeybind.defaultValue("diff_previous_hunk")).toBe("[")
+    expect(TuiKeybind.defaultValue("diff_next_hunk")).toBe("[")
+    expect(TuiKeybind.defaultValue("diff_previous_hunk")).toBe("]")
 
     viewer.commands.get("diff.next_hunk")!.run?.({} as never)
     await viewer.app.renderOnce()

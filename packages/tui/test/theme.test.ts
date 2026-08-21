@@ -2,6 +2,7 @@ import { expect, test } from "bun:test"
 import { mkdir, writeFile } from "node:fs/promises"
 import path from "node:path"
 import type { TerminalColors } from "@opentui/core"
+import { RGBA } from "@opentui/core"
 import { DEFAULT_THEMES, addTheme, allThemes, hasTheme, resolveTheme, terminalMode } from "../src/theme"
 import { discoverThemes } from "../src/context/theme"
 import { tmpdir } from "./fixture/fixture"
@@ -42,6 +43,26 @@ test("resolveTheme rejects circular color refs", () => {
   item.defs = { ...item.defs, one: "two", two: "one" }
   item.theme.primary = "one"
   expect(() => resolveTheme(item, "dark")).toThrow("Circular color reference")
+})
+
+// UT-T1 (FR-1/FR-3, план §11): опциональные ключи декораций диффа резолвятся без
+// override — фоллбэки backgroundElement и tint(accent).
+test("resolveTheme falls back for diff decoration keys (UT-T1)", () => {
+  const item = structuredClone(DEFAULT_THEMES.opencode)
+  const resolved = resolveTheme(item, "dark")
+  expect(resolved.diffCursorLineBg).toBeDefined()
+  expect(resolved.diffAnnotationMarkBg).toBeDefined()
+  expect(resolved.diffCursorLineBg).toEqual(resolved.backgroundElement)
+  expect(resolved.diffAnnotationMarkBg).not.toEqual(resolved.backgroundElement)
+})
+
+test("resolveTheme honors explicit diff decoration overrides", () => {
+  const item = structuredClone(DEFAULT_THEMES.opencode)
+  item.theme.diffCursorLineBg = "#123456"
+  item.theme.diffAnnotationMarkBg = "#654321"
+  const resolved = resolveTheme(item, "dark")
+  expect(resolved.diffCursorLineBg).toEqual(RGBA.fromHex("#123456"))
+  expect(resolved.diffAnnotationMarkBg).toEqual(RGBA.fromHex("#654321"))
 })
 
 function terminalColors(defaultBackground: string | null, palette: Array<string | null> = []): TerminalColors {

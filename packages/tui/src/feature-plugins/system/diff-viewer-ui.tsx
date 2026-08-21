@@ -7,6 +7,12 @@ export type Axis = "x" | "y"
 export type SeparatorEdge = "edge" | "edge-in" | "edge-out"
 export type PanelBorder = "start" | "end" | "both" | "none"
 
+// Ширина колонки Key модалки справки: вмещает самый длинный биндинг
+// (alt+enter) с разделителем, но не уже базовой широты коротких клавиш.
+export function helpKeyColumnWidth(labels: readonly string[]): number {
+  return Math.max(6, ...labels.map((label) => label.length + 1))
+}
+
 const PanelGroupContext = createContext<{ axis: Axis }>()
 
 function crossAxis(axis: Axis) {

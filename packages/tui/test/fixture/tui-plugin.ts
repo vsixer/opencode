@@ -8,6 +8,8 @@ type Opts = {
   attention?: Partial<TuiPluginApi["attention"]>
   event?: TuiPluginApi["event"]
   state?: { session?: Partial<TuiPluginApi["state"]["session"]> }
+  // Переопределение темы: тестам декораций нужны различимые значения ключей.
+  theme?: TuiPluginApi["theme"]
 }
 
 export function createTuiPluginApi(opts: Opts = {}) {
@@ -29,7 +31,7 @@ export function createTuiPluginApi(opts: Opts = {}) {
       ready: true,
     },
     state: { session: { get: () => undefined, ...opts.state?.session } },
-    theme: { current: new Proxy({}, { get: () => color }) },
+    theme: opts.theme ?? { current: new Proxy({}, { get: () => color }) },
     tuiConfig: createTuiResolvedConfig(),
     ui: { dialog },
   } as unknown as TuiPluginApi

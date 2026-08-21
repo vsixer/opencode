@@ -330,6 +330,8 @@ export type TuiThemeCurrent = {
   readonly diffLineNumber: RGBA
   readonly diffAddedLineNumberBg: RGBA
   readonly diffRemovedLineNumberBg: RGBA
+  readonly diffCursorLineBg: RGBA
+  readonly diffAnnotationMarkBg: RGBA
   readonly markdownText: RGBA
   readonly markdownHeading: RGBA
   readonly markdownLink: RGBA

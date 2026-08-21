@@ -63,6 +63,8 @@ export type Theme = {
   readonly diffLineNumber: RGBA
   readonly diffAddedLineNumberBg: RGBA
   readonly diffRemovedLineNumberBg: RGBA
+  readonly diffCursorLineBg: RGBA
+  readonly diffAnnotationMarkBg: RGBA
   readonly markdownText: RGBA
   readonly markdownHeading: RGBA
   readonly markdownLink: RGBA
@@ -120,9 +122,14 @@ type ColorValue = HexColor | RefName | Variant | RGBA
 export type ThemeJson = {
   $schema?: string
   defs?: Record<string, HexColor | RefName>
-  theme: Omit<Record<ThemeColor, ColorValue>, "selectedListItemText" | "backgroundMenu"> & {
+  theme: Omit<
+    Record<ThemeColor, ColorValue>,
+    "selectedListItemText" | "backgroundMenu" | "diffCursorLineBg" | "diffAnnotationMarkBg"
+  > & {
     selectedListItemText?: ColorValue
     backgroundMenu?: ColorValue
+    diffCursorLineBg?: ColorValue
+    diffAnnotationMarkBg?: ColorValue
     thinkingOpacity?: number
   }
 }
@@ -265,7 +272,14 @@ export function resolveTheme(theme: ThemeJson, mode: "dark" | "light") {
 
   const resolved = Object.fromEntries(
     Object.entries(theme.theme)
-      .filter(([key]) => key !== "selectedListItemText" && key !== "backgroundMenu" && key !== "thinkingOpacity")
+      .filter(
+        ([key]) =>
+          key !== "selectedListItemText" &&
+          key !== "backgroundMenu" &&
+          key !== "thinkingOpacity" &&
+          key !== "diffCursorLineBg" &&
+          key !== "diffAnnotationMarkBg",
+      )
       .map(([key, value]) => {
         return [key, resolveColor(value as ColorValue)]
       }),
@@ -286,6 +300,19 @@ export function resolveTheme(theme: ThemeJson, mode: "dark" | "light") {
     resolved.backgroundMenu = resolveColor(theme.theme.backgroundMenu)
   } else {
     resolved.backgroundMenu = resolved.backgroundElement
+  }
+
+  // Декорации diff-viewer-аннотаций — опциональные ключи с фоллбэками (план §11):
+  // подсветка текущей строки → backgroundElement, пометка аннотации → тинт акцента.
+  if (theme.theme.diffCursorLineBg !== undefined) {
+    resolved.diffCursorLineBg = resolveColor(theme.theme.diffCursorLineBg)
+  } else {
+    resolved.diffCursorLineBg = resolved.backgroundElement
+  }
+  if (theme.theme.diffAnnotationMarkBg !== undefined) {
+    resolved.diffAnnotationMarkBg = resolveColor(theme.theme.diffAnnotationMarkBg)
+  } else {
+    resolved.diffAnnotationMarkBg = tint(resolved.background!, resolved.accent!, 0.25)
   }
 
   // Handle thinkingOpacity - optional with default of 0.6
