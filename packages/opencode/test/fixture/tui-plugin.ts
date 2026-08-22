@@ -57,6 +57,8 @@ function themeCurrent(): HostPluginApi["theme"]["current"] {
     diffLineNumber: b,
     diffAddedLineNumberBg: h,
     diffRemovedLineNumberBg: h,
+    diffCursorLineBg: i,
+    diffAnnotationMarkBg: e,
     markdownText: c,
     markdownHeading: c,
     markdownLink: a,
