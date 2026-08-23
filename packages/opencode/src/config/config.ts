@@ -50,6 +50,9 @@ function mergeConfigConcatArrays(target: Info, source: Info): Info {
   if (target.instructions && source.instructions) {
     merged.instructions = Array.from(new Set([...target.instructions, ...source.instructions]))
   }
+  if (target.instructionsExclude && source.instructionsExclude) {
+    merged.instructionsExclude = Array.from(new Set([...target.instructionsExclude, ...source.instructionsExclude]))
+  }
   return merged
 }
 

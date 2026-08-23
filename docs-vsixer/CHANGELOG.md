@@ -6,6 +6,14 @@ Entries: newest first. Format: `YYYY-MM-DD — <feature>` with a link to `featur
 
 ---
 
+## 2026-08-22 — instructionsExclude: исключение файлов инструкций
+
+Новое поле `instructionsExclude` в `opencode.json`: список glob-паттернов файлов инструкций, которые opencode игнорирует без удаления с диска. Фильтр действует на все файловые источники — глобальные файлы, автопоиск `AGENTS.md`/`CLAUDE.md`/`CONTEXT.md`, явные пути из `instructions` и walk-up подключение при чтении файлов; URL не затрагиваются. Паттерны сопоставляются относительно корня проекта (в non-git каталогах — рабочей директории), для внешних файлов поддерживается абсолютный путь и префикс `~/`; exclude побеждает include. Поле опционально — без него поведение идентично upstream.
+
+Конфликтная поверхность: изменены четыре upstream-owned файла (`packages/core/src/v1/config/config.ts`, `packages/opencode/src/config/config.ts`, `packages/opencode/src/session/instruction.ts`, `packages/opencode/test/session/instruction.test.ts`) — вставки локальны, вероятность конфликта при синке низкая.
+
+Docs: [`features/exclude-configs.md`](features/exclude-configs.md).
+
 ## 2026-08-08 — /reload hot config reload
 
 Slash-команда `/reload` и тул `reload_config` горячо перезагружают конфигурацию (`opencode.jsonc`, плагины, MCP-серверы, instance-scoped сервисы) без перезапуска TUI. Если есть активные сессии — релод ставится в очередь до idle, затем инстанс перезагружается через `InstanceStore.reload`, а TUI ре-синхронизируется (overlay + bootstrap-cycle handshake `POST /config/bootstrap-complete`). Состояние per-instance; повторные запросы коалясятся; overlay защищён fallback-таймаутом. Тул `reload_config` больше не инжектит синтетический continuation-prompt — durable-история остаётся чистой.

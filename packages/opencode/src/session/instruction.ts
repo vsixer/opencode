@@ -88,6 +88,23 @@ const layer: Layer.Layer<
         .pipe(Effect.catch(() => Effect.succeed([] as string[])))
     })
 
+    // Exclude-паттерны сопоставляются с путём относительно корня проекта (для файлов внутри него)
+    // или с абсолютным путём; `~/`-паттерны раскрываются в домашний каталог. minimatch ожидает `/`.
+    // В non-git проектах worktree = "/" и относительная база от него бессмысленна —
+    // паттерны сопоставляются относительно рабочей директории.
+    const excluded = (
+      config: { instructionsExclude?: string[] },
+      ctx: { directory: string; worktree: string },
+      filepath: string,
+    ): boolean => {
+      const patterns = config.instructionsExclude
+      if (!patterns || patterns.length === 0) return false
+      const base = ctx.worktree === "/" ? ctx.directory : ctx.worktree
+      const inside = filepath === base || filepath.startsWith(base + path.sep)
+      const candidate = inside ? path.relative(base, filepath).split(path.sep).join("/") : filepath
+      return patterns.some((p) => fs.globMatch(p.startsWith("~/") ? path.join(global.home, p.slice(2)) : p, candidate))
+    }
+
     const read = Effect.fnUntraced(function* (filepath: string) {
       return yield* fs.readFileString(filepath).pipe(Effect.catch(() => Effect.succeed("")))
     })
@@ -149,6 +166,10 @@ const layer: Layer.Layer<
         }
       }
 
+      for (const p of paths) {
+        if (excluded(config, ctx, p)) paths.delete(p)
+      }
+
       return paths
     })
 
@@ -181,6 +202,7 @@ const layer: Layer.Layer<
       filepath: string,
       messageID: MessageID,
     ) {
+      const config = yield* cfg.get()
       const sys = yield* systemPaths()
       const already = extract(messages)
       const results: { filepath: string; content: string }[] = []
@@ -188,12 +210,13 @@ const layer: Layer.Layer<
       const root = path.resolve(yield* InstanceState.directory)
 
       const target = path.resolve(filepath)
+      const ctx = yield* InstanceState.context
       let current = path.dirname(target)
 
       // Walk upward from the file being read and attach nearby instruction files once per message.
       while (current.startsWith(root) && current !== root) {
         const found = yield* find(current)
-        if (!found || found === target || sys.has(found) || already.has(found)) {
+        if (!found || found === target || sys.has(found) || already.has(found) || excluded(config, ctx, found)) {
           current = path.dirname(current)
           continue
         }

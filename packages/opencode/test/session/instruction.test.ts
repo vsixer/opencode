@@ -30,19 +30,21 @@ const it = testEffect(
   ]),
 )
 
-const configLayer = Layer.succeed(Config.Service, TestConfig.make())
-
-const instructionLayer = (global: Partial<Global.Interface>, flags: Partial<RuntimeFlags.Info> = {}) =>
+const instructionLayer = (
+  global: Partial<Global.Interface>,
+  flags: Partial<RuntimeFlags.Info> = {},
+  configOverrides: Partial<Config.Interface> = {},
+) =>
   AppNodeBuilder.build(Instruction.node, [
-    [Config.node, configLayer],
+    [Config.node, Layer.succeed(Config.Service, TestConfig.make(configOverrides))],
     [Global.node, Global.layerWith(global)],
     [RuntimeFlags.node, RuntimeFlags.layer(flags)],
   ])
 
 const provideInstruction =
-  (global: Partial<Global.Interface>, flags?: Partial<RuntimeFlags.Info>) =>
+  (global: Partial<Global.Interface>, flags?: Partial<RuntimeFlags.Info>, configOverrides?: Partial<Config.Interface>) =>
   <A, E, R>(self: Effect.Effect<A, E, R>) =>
-    self.pipe(Effect.provide(instructionLayer(global, flags)))
+    self.pipe(Effect.provide(instructionLayer(global, flags, configOverrides)))
 
 const write = (filepath: string, content: string) =>
   Effect.gen(function* () {
@@ -58,11 +60,22 @@ const writeFiles = (dir: string, files: Record<string, string>) =>
   )
 
 const withFiles = <A, E, R>(files: Record<string, string>, self: (dir: string) => Effect.Effect<A, E, R>) =>
-  provideTmpdirInstance((dir) =>
-    Effect.gen(function* () {
-      yield* writeFiles(dir, files)
-      return yield* self(dir).pipe(provideInstruction({ home: dir, config: dir }))
-    }),
+  withFilesConfig(files, {}, self)
+
+const withFilesConfig = <A, E, R>(
+  files: Record<string, string>,
+  configOverrides: Partial<Config.Interface>,
+  self: (dir: string) => Effect.Effect<A, E, R>,
+) =>
+  // git-репозиторий даёт worktree = корню tmpdir; без git worktree = "/" и
+  // include-паттерны с ** уходит в glob по всей корневой ФС.
+  provideTmpdirInstance(
+    (dir) =>
+      Effect.gen(function* () {
+        yield* writeFiles(dir, files)
+        return yield* self(dir).pipe(provideInstruction({ home: dir, config: dir }, undefined, configOverrides))
+      }),
+    { git: true },
   )
 
 const tmpWithFiles = (files: Record<string, string>) =>
@@ -260,5 +273,97 @@ describe("Instruction.systemPaths global config", () => {
         expect(paths.has(path.join(globalTmp, "AGENTS.md"))).toBe(true)
       }).pipe(provideInstance(projectTmp), provideInstruction({ home: globalTmp, config: globalTmp }))
     }),
+  )
+})
+
+describe("Instruction.instructionsExclude", () => {
+  it.live("root pattern excludes the root AGENTS.md from systemPaths", () =>
+    withFilesConfig({ "AGENTS.md": "# Root Instructions" }, { get: () => Effect.succeed({ instructionsExclude: ["AGENTS.md"] }) }, (dir) =>
+      Effect.gen(function* () {
+        const svc = yield* Instruction.Service
+        const paths = yield* svc.systemPaths()
+        expect(paths.has(path.join(dir, "AGENTS.md"))).toBe(false)
+        expect(yield* svc.system()).toEqual([])
+      }),
+    ),
+  )
+
+  it.live("nested and recursive patterns exclude explicit instructions entries", () =>
+    withFilesConfig(
+      { "AGENTS.md": "# Root", "docs/AGENTS.md": "# Docs" },
+      {
+        get: () =>
+          Effect.succeed({ instructions: ["**/AGENTS.md"], instructionsExclude: ["docs/AGENTS.md"] }),
+      },
+      (dir) =>
+        Effect.gen(function* () {
+          const svc = yield* Instruction.Service
+          const paths = yield* svc.systemPaths()
+          expect(paths.has(path.join(dir, "docs", "AGENTS.md"))).toBe(false)
+        }),
+    ),
+  )
+
+  it.live("exclude wins over explicit instructions include", () =>
+    withFilesConfig(
+      { "extra.md": "# Extra" },
+      {
+        get: () =>
+          Effect.succeed({ instructions: ["extra.md"], instructionsExclude: ["extra.md"] }),
+      },
+      (dir) =>
+        Effect.gen(function* () {
+          const svc = yield* Instruction.Service
+          const paths = yield* svc.systemPaths()
+          expect(paths.has(path.join(dir, "extra.md"))).toBe(false)
+        }),
+    ),
+  )
+
+  it.live("home-relative pattern excludes the global instruction file", () =>
+    Effect.gen(function* () {
+      const globalTmp = yield* tmpWithFiles({ "AGENTS.md": "# Global Instructions" })
+      const projectTmp = yield* tmpdirScoped()
+
+      yield* Effect.gen(function* () {
+        const svc = yield* Instruction.Service
+        const paths = yield* svc.systemPaths()
+        expect(paths.has(path.join(globalTmp, "AGENTS.md"))).toBe(false)
+      }).pipe(
+        provideInstance(projectTmp),
+        provideInstruction({ home: globalTmp, config: globalTmp }, undefined, {
+          get: () => Effect.succeed({ instructionsExclude: ["~/AGENTS.md"] }),
+        }),
+      )
+    }),
+  )
+
+  it.live("resolve walk-up does not attach an excluded nearby file", () =>
+    withFilesConfig(
+      { "AGENTS.md": "# Root", "docs/AGENTS.md": "# Docs", "docs/file.ts": "const x = 1" },
+      { get: () => Effect.succeed({ instructionsExclude: ["docs/AGENTS.md"] }) },
+      (dir) =>
+        Effect.gen(function* () {
+          const svc = yield* Instruction.Service
+          const paths = yield* svc.systemPaths()
+          expect(paths.has(path.join(dir, "docs", "AGENTS.md"))).toBe(false)
+
+          const results = yield* svc.resolve([], path.join(dir, "docs", "file.ts"), MessageID.make("msg_message-exclude-1"))
+          expect(results).toEqual([])
+        }),
+    ),
+  )
+
+  it.live("without instructionsExclude the explicit instructions entry is kept", () =>
+    withFilesConfig(
+      { "extra.md": "# Extra" },
+      { get: () => Effect.succeed({ instructions: ["extra.md"] }) },
+      (dir) =>
+        Effect.gen(function* () {
+          const svc = yield* Instruction.Service
+          const paths = yield* svc.systemPaths()
+          expect(paths.has(path.join(dir, "extra.md"))).toBe(true)
+        }),
+    ),
   )
 })
