@@ -249,8 +249,18 @@ export function Session() {
     if (session()?.parentID) return []
     return children().flatMap((x) => sync.data.question[x.id] ?? [])
   })
-  const visible = createMemo(() => !session()?.parentID && permissions().length === 0 && questions().length === 0)
-  const disabled = createMemo(() => permissions().length > 0 || questions().length > 0)
+  const [resolvedQuestionID, setResolvedQuestionID] = createSignal<string>()
+  const activeQuestions = createMemo(() => questions().filter((q) => q.id !== resolvedQuestionID()))
+  // Сброс по ссылке на запрос, а не по id: сервер может повторно обновить тот же
+  // запрос (тот же id) до подтверждения — тогда форма должна вернуться.
+  createEffect(
+    on(
+      () => questions()[0],
+      () => setResolvedQuestionID(undefined),
+    ),
+  )
+  const visible = createMemo(() => !session()?.parentID && permissions().length === 0 && activeQuestions().length === 0)
+  const disabled = createMemo(() => permissions().length > 0 || activeQuestions().length > 0)
 
   // Пока висит вопрос пользователя, активный ход «на паузе»: запоминаем начало
   // паузы, а когда ответ получен — добавляем отрезок к накопленной паузе хода.
@@ -1337,10 +1347,11 @@ export function Session() {
                     directory={sync.session.get(permissions()[0].sessionID)?.directory}
                   />
                 </Show>
-                <Show when={permissions().length === 0 && questions().length > 0}>
+                <Show when={permissions().length === 0 && activeQuestions().length > 0}>
                   <QuestionPrompt
-                    request={questions()[0]}
-                    directory={sync.session.get(questions()[0].sessionID)?.directory}
+                    request={activeQuestions()[0]}
+                    directory={sync.session.get(activeQuestions()[0].sessionID)?.directory}
+                    onResolve={setResolvedQuestionID}
                   />
                 </Show>
                 <Show when={session()?.parentID}>
