@@ -6,6 +6,18 @@ Entries: newest first. Format: `YYYY-MM-DD — <feature>` with a link to `featur
 
 ---
 
+## 2026-08-29 — agent-models: нативный реестр моделей агентов и команд
+
+Нативная поддержка `agent-models.jsonc` (env `OPENCODE_AGENT_MODELS` →
+worktree/directory `.opencode/config` → global), роли `prefix:path` →
+`capability[:N]`, availability с providerGroups, оверлей
+`agent-models.local.jsonc`, strip рукописного `reasoningEffort` команд и
+конвейер reasoning роли команды до провайдера (побеждает variant и reasoning
+агента), включая subtask-команды (уровень роли доезжает до дочерней сессии
+через TaskTool). Подробности: [features/agent-models.md](features/agent-models.md).
+
+---
+
 ## 2026-08-22 — instructionsExclude: исключение файлов инструкций
 
 Новое поле `instructionsExclude` в `opencode.json`: список glob-паттернов файлов инструкций, которые opencode игнорирует без удаления с диска. Фильтр действует на все файловые источники — глобальные файлы, автопоиск `AGENTS.md`/`CLAUDE.md`/`CONTEXT.md`, явные пути из `instructions` и walk-up подключение при чтении файлов; URL не затрагиваются. Паттерны сопоставляются относительно корня проекта (в non-git каталогах — рабочей директории), для внешних файлов поддерживается абсолютный путь и префикс `~/`; exclude побеждает include. Поле опционально — без него поведение идентично upstream.

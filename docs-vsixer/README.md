@@ -29,6 +29,7 @@ If a fork change requires modifying an upstream file, record the deviation in th
 - [`features/materialize-attachment.md`](features/materialize-attachment.md) — `materialize-attachment` tool: turns an inline pasted/attached image into a real file path so non-vision models can route it to vision tools (`zai-mcp-server_*`). Status: stable, 2026-08-08.
 - [`features/config-reload.md`](features/config-reload.md) — `/reload` slash command + `reload_config` tool: hot-reload config, plugins, MCP servers, and instance services without restarting the TUI (adapts upstream PR #9871 to the fork's node-layer + schema event-manifest architecture). Status: stable, 2026-08-08.
 - [`features/exclude-configs.md`](features/exclude-configs.md) — `instructionsExclude` config field: glob patterns of instruction files (`AGENTS.md`, …) that opencode ignores without deleting them from disk; applies to global files, auto-discovery, explicit `instructions` paths, and walk-up attach. Status: stable, 2026-08-22.
+- [`features/agent-models.md`](features/agent-models.md) — native `agent-models.jsonc` registry: role-based model/reasoning assignment for agents and commands, availability gates, `.local.jsonc` overlay, command reasoning pipeline (registry role beats agent reasoning and variants). Status: implemented, 2026-08-29.
 
 ## Changelog
 

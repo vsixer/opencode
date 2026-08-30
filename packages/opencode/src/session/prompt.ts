@@ -273,6 +273,7 @@ const layer = Layer.effect(
         mode: task.agent,
         agent: task.agent,
         variant: lastUser.model.variant,
+        reasoningEffort: lastUser.model.reasoningEffort,
         path: { cwd: ctx.directory, root: ctx.worktree },
         cost: 0,
         tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
@@ -664,6 +665,7 @@ const layer = Layer.effect(
           providerID: model.providerID,
           modelID: model.modelID,
           variant,
+          ...(input.reasoningEffort ? { reasoningEffort: input.reasoningEffort } : {}),
         },
         system: input.system,
         format: input.format,
@@ -1190,6 +1192,7 @@ const layer = Layer.effect(
             mode: agent.name,
             agent: agent.name,
             variant: lastUser.model.variant,
+            reasoningEffort: lastUser.model.reasoningEffort,
             path: { cwd: ctx.directory, root: ctx.worktree },
             cost: 0,
             tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
@@ -1444,7 +1447,11 @@ const layer = Layer.effect(
               agent: agent.name,
               description: cmd.description ?? "",
               command: input.command,
-              model: { providerID: taskModel.providerID, modelID: taskModel.modelID },
+              model: {
+                providerID: taskModel.providerID,
+                modelID: taskModel.modelID,
+                ...(cmd.reasoningEffort ? { reasoningEffort: cmd.reasoningEffort } : {}),
+              },
               prompt: templateParts.find((y) => y.type === "text")?.text ?? "",
             },
           ]
@@ -1470,6 +1477,7 @@ const layer = Layer.effect(
         agent: userAgent,
         parts,
         variant: input.variant,
+        reasoningEffort: cmd.reasoningEffort,
       })
       yield* events.publish(Command.Event.Executed, {
         name: input.command,
@@ -1509,6 +1517,9 @@ export const PromptInput = Schema.Struct({
   format: Schema.optional(SessionV1.Format),
   system: Schema.optional(Schema.String),
   variant: Schema.optional(Schema.String),
+  // reasoning-уровень роли команды из реестра agent-models; при выполнении
+  // команды побеждает reasoning агента и variant-наборы модели.
+  reasoningEffort: Schema.optional(Schema.String),
   parts: Schema.Array(
     Schema.Union([
       SessionV1.TextPartInput,

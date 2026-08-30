@@ -29,6 +29,7 @@ import { RemoteAuthError } from "@opencode-ai/core/v1/config/error"
 import { ConfigPermissionV1 } from "@opencode-ai/core/v1/config/permission"
 import { ConfigPluginV1 } from "@opencode-ai/core/v1/config/plugin"
 import { ConfigAgent } from "./agent"
+import { ConfigAgentModels } from "./agent-models"
 import { ConfigCommand } from "./command"
 import { ConfigManaged } from "./managed"
 import { ConfigMerge } from "./merge"
@@ -501,6 +502,20 @@ const layer = Layer.effect(
           // returns normalized Specs and we only need to attach origin metadata here.
           const list = yield* Effect.promise(() => ConfigPlugin.load(dir))
           yield* mergePluginOrigins(dir, list)
+        }
+
+        // Реестр agent-models: strip рукописного reasoning команд выполняется всегда,
+        // инъекция model/reasoning — post-scan/pre-fold, пока в Definition доступен
+        // source-путь как join-ключ ролей.
+        for (const l of layered) {
+          for (const def of Object.values(l.commands)) delete def.frontmatter.reasoningEffort
+        }
+        const loaded = yield* ConfigAgentModels.loadRegistry(ctx)
+        if (loaded.status === "ok") {
+          yield* ConfigAgentModels.applyRegistry(
+            layered.flatMap((l) => [...Object.values(l.commands), ...Object.values(l.agents)]),
+            loaded.registry,
+          )
         }
 
         // Слоистое слияние command/agent/mode: fold по ordered layers, затем один decode над итогом.

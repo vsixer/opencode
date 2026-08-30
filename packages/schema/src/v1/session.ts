@@ -211,6 +211,7 @@ export const SubtaskPart = Schema.Struct({
     Schema.Struct({
       providerID: Provider.ID,
       modelID: Model.ID,
+      reasoningEffort: Schema.optional(Schema.String),
     }),
   ),
   command: Schema.optional(Schema.String),
@@ -348,6 +349,9 @@ export const User = Schema.Struct({
     providerID: Provider.ID,
     modelID: Model.ID,
     variant: Schema.optional(Schema.String),
+    // reasoning-уровень роли команды из реестра agent-models; доставляется
+    // до опций провайдера и переживает continuation-ходы tool-loop.
+    reasoningEffort: Schema.optional(Schema.String),
   }),
   system: Schema.optional(Schema.String),
   tools: Schema.optional(Schema.Record(Schema.String, Schema.Boolean)),
@@ -481,6 +485,7 @@ export const Assistant = Schema.Struct({
   }),
   structured: Schema.optional(Schema.Any),
   variant: Schema.optional(Schema.String),
+  reasoningEffort: Schema.optional(Schema.String),
   finish: Schema.optional(Schema.String),
 }).annotate({ identifier: "AssistantMessage" })
 export type Assistant = Omit<Types.DeepMutable<Schema.Schema.Type<typeof Assistant>>, "error"> & {

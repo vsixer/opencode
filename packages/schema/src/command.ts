@@ -12,4 +12,5 @@ export const Info = Schema.Struct({
   agent: Schema.String.pipe(optional),
   model: Model.Ref.pipe(optional),
   subtask: Schema.Boolean.pipe(optional),
+  reasoningEffort: Schema.String.pipe(optional),
 }).annotate({ identifier: "CommandV2.Info" })

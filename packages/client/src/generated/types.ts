@@ -2514,6 +2514,7 @@ export type CommandsListOutput = {
     readonly agent?: string
     readonly model?: { readonly id: string; readonly providerID: string; readonly variant?: string }
     readonly subtask?: boolean
+    readonly reasoningEffort?: string
   }>
 }
 

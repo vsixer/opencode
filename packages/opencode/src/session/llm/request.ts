@@ -53,6 +53,18 @@ export type Prepared = {
 const mergeOptions = (target: Record<string, any>, source: Record<string, any> | undefined): Record<string, any> =>
   mergeDeep(target, source ?? {}) as Record<string, any>
 
+// Reasoning роли команды из реестра agent-models применяется последним — после
+// variant-наборов и agent.options: уровень ":N" обязан побеждать и агентский
+// default-variant, и reasoning агента. Условное присваивание, чтобы отсутствие
+// значения не затирало agent.options.reasoningEffort.
+export function applyCommandReasoning(
+  options: Record<string, any>,
+  effort: string | undefined,
+  small: boolean | undefined,
+) {
+  if (!small && effort) options.reasoningEffort = effort
+}
+
 export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: PrepareInput) {
   const isOpenaiOauth = input.provider.id === "openai" && input.auth?.type === "oauth"
   const system = [
@@ -89,6 +101,11 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
         providerOptions: input.provider.options,
       })
   const options = mergeOptions(mergeOptions(mergeOptions(base, input.model.options), input.agent.options), variant)
+  // Асимметрия переходного окна реестра agent-models: reasoning КОМАНДНОЙ роли
+  // обязан побеждать variant-наборы, поэтому применяется после них; reasoning
+  // АГЕНТНОЙ роли едет по существующему конвейеру (agent.options) и variant
+  // может его перекрыть — это осознанное решение спеки.
+  applyCommandReasoning(options, input.user.model.reasoningEffort, input.small)
   if (
     input.model.api.npm === "@ai-sdk/azure" &&
     (input.provider.options.useCompletionUrls || input.model.options.useCompletionUrls || options.useCompletionUrls)

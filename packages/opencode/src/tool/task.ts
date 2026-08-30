@@ -177,6 +177,9 @@ export const TaskTool = Tool.define(
       )
       if (msg.info.role !== "assistant") return yield* Effect.fail(new Error("Not an assistant message"))
       const variant = msg.info.variant
+      // Reasoning роли команды (реестр agent-models) зеркалируется на assistant-сообщении
+      // родительского хода; доезжает в дочернюю сессию тем же каналом, что и variant.
+      const reasoningEffort = msg.info.reasoningEffort
 
       const model = next.model ?? {
         modelID: msg.info.modelID,
@@ -207,6 +210,7 @@ export const TaskTool = Tool.define(
             providerID: model.providerID,
           },
           variant: next.model ? undefined : variant,
+          ...(reasoningEffort ? { reasoningEffort } : {}),
           agent: next.name,
           parts,
         })
