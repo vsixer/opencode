@@ -510,12 +510,16 @@ const layer = Layer.effect(
         for (const l of layered) {
           for (const def of Object.values(l.commands)) delete def.frontmatter.reasoningEffort
         }
-        const loaded = yield* ConfigAgentModels.loadRegistry(ctx)
+        const agentModelsPath = typeof result.agent_models === "string" ? result.agent_models : undefined
+        const loaded = yield* ConfigAgentModels.loadRegistry(ctx, agentModelsPath)
         if (loaded.status === "ok") {
           yield* ConfigAgentModels.applyRegistry(
             layered.flatMap((l) => [...Object.values(l.commands), ...Object.values(l.agents)]),
             loaded.registry,
           )
+          // Встроенные агенты назначаются в сырую agent-секцию до decode:
+          // явная model в opencode.json остаётся приоритетнее реестра.
+          yield* ConfigAgentModels.applyBuiltinRoles(result.agent, loaded.registry)
         }
 
         // Слоистое слияние command/agent/mode: fold по ordered layers, затем один decode над итогом.

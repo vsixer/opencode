@@ -32,7 +32,10 @@ export type LoadedRegistry =
   | { status: "ok"; registry: Registry }
 
 const FILENAME = "agent-models.jsonc"
-const OVERLAY = "agent-models.local.jsonc"
+const OVERLAY = "agent-models.disabled.jsonc"
+// Deprecated-имя оверлея: пока файл не переименован на всех машинах, читается
+// с warning-ом; при наличии обоих имён выигрывает новое.
+const OVERLAY_LEGACY = "agent-models.local.jsonc"
 
 function isFile(p: string) {
   try {
@@ -72,15 +75,24 @@ function asRegistry(data: unknown): Registry {
 // Оверлей рядом с найденным базовым файлом: учитываются только списки отключения,
 // значения конкатенируются с базой. Битый оверлей игнорируется целиком.
 function applyOverlay(registry: Registry, file: string): Effect.Effect<Registry> {
-  const overlayPath = path.join(path.dirname(file), OVERLAY)
-  if (!isFile(overlayPath)) return Effect.succeed(registry)
+  const dir = path.dirname(file)
+  const overlayPath = path.join(dir, OVERLAY)
+  const legacyPath = path.join(dir, OVERLAY_LEGACY)
+  const found = isFile(overlayPath) ? overlayPath : isFile(legacyPath) ? legacyPath : undefined
+  if (found === undefined) return Effect.succeed(registry)
   return Effect.gen(function* () {
-    const text = yield* Effect.promise(() => fs.promises.readFile(overlayPath, "utf8"))
+    if (found === legacyPath) {
+      yield* Effect.logWarning(
+        "agent-models registry: legacy overlay name agent-models.local.jsonc is deprecated, rename to agent-models.disabled.jsonc",
+        { path: legacyPath },
+      )
+    }
+    const text = yield* Effect.promise(() => fs.promises.readFile(found, "utf8"))
     let data: unknown
     try {
-      data = ConfigParse.jsonc(text, overlayPath)
+      data = ConfigParse.jsonc(text, found)
     } catch (error) {
-      yield* Effect.logWarning("agent-models registry: broken overlay ignored", { path: overlayPath, error: String(error) })
+      yield* Effect.logWarning("agent-models registry: broken overlay ignored", { path: found, error: String(error) })
       return registry
     }
     if (!isRecord(data)) return registry
@@ -93,7 +105,7 @@ function applyOverlay(registry: Registry, file: string): Effect.Effect<Registry>
         const value = (source as Record<string, unknown>)[key]
         if (value === undefined) continue
         if (!Array.isArray(value)) {
-          yield* Effect.logWarning(`agent-models registry: overlay "${key}" is not an array, ignored`, { path: overlayPath })
+          yield* Effect.logWarning(`agent-models registry: overlay "${key}" is not an array, ignored`, { path: found })
           continue
         }
         registry.availability[key] = [...registry.availability[key], ...value]
@@ -103,19 +115,40 @@ function applyOverlay(registry: Registry, file: string): Effect.Effect<Registry>
   })
 }
 
-export const loadRegistry = Effect.fn("ConfigAgentModels.loadRegistry")(function* (ctx: InstanceContext) {
-  // worktree-корень — каноническое место .opencode; directory покрывает рабочую
-  // директорию вне git-репозитория.
-  const envPath = Flag.OPENCODE_AGENT_MODELS
+export const loadRegistry = Effect.fn("ConfigAgentModels.loadRegistry")(function* (
+  ctx: InstanceContext,
+  configPath?: string,
+) {
+  // Путь из opencode.json (ключ agent_models): относительный путь неоднозначен
+  // (относительно чего — worktree, directory, глобального файла?), поэтому
+  // принимаются только абсолютные пути и формы от ~.
+  let fromConfig: string | undefined
+  if (typeof configPath === "string" && configPath !== "") {
+    if (!configPath.startsWith("/") && !configPath.startsWith("~")) {
+      yield* Effect.logWarning("agent-models registry: agent_models must be an absolute or ~-relative path, ignored", {
+        path: configPath,
+      })
+    } else {
+      fromConfig = configPath
+    }
+  }
   // Env задан, но файла нет — типовая опечатка при запуске; молча слой бы
   // выключился, и диагностировать это по логу невозможно.
+  const envPath = Flag.OPENCODE_AGENT_MODELS
   if (envPath && !isFile(envPath)) {
     yield* Effect.logWarning("agent-models registry: OPENCODE_AGENT_MODELS is set but the file does not exist, ignored", {
       path: envPath,
     })
   }
+  if (fromConfig && !isFile(fromConfig)) {
+    yield* Effect.logWarning("agent-models registry: agent_models points to a missing file, ignored", { path: fromConfig })
+    fromConfig = undefined
+  }
+  // worktree-корень — каноническое место .opencode; directory покрывает рабочую
+  // директорию вне git-репозитория.
   const candidates = [
     envPath,
+    fromConfig,
     path.join(ctx.worktree, ".opencode", "config", FILENAME),
     path.join(ctx.directory, ".opencode", "config", FILENAME),
     path.join(Global.Path.config, "config", FILENAME),
@@ -222,6 +255,63 @@ function modelString(entry: unknown) {
   return undefined
 }
 
+type RoleResolution = { model?: string; reasoning?: string; warnings: string[] }
+
+// Общая логика разрешения "capability[:N]" для файловых и builtin-ролей:
+// warnings возвращаются данными — вызывающий логирует со своим контекстом.
+function resolveRoleValue(
+  registry: Registry,
+  providersOff: Set<string>,
+  modelsOff: Set<string>,
+  value: string,
+): RoleResolution {
+  const warnings: string[] = []
+  const [cap, levelRaw] = value.includes(":") ? (value.split(/:(.*)/, 2) as [string, string]) : [value, undefined]
+  const levelStr = levelRaw === "" ? "0" : levelRaw
+  if (levelStr !== undefined && !/^\d+$/.test(levelStr)) {
+    warnings.push(`invalid reasoning level "${levelStr}"`)
+    return { warnings }
+  }
+  const candidates = registry.capabilities[cap]
+  if (!Array.isArray(candidates) || candidates.length === 0) {
+    warnings.push(`unknown capability "${cap}"`)
+    return { warnings }
+  }
+  let chosen: { model: string; entry: unknown } | undefined
+  for (const alias of candidates) {
+    if (typeof alias !== "string") {
+      warnings.push("capability candidate is not a string")
+      return { warnings }
+    }
+    if (modelsOff.has(alias)) continue
+    const entry = registry.models[alias]
+    const model = modelString(entry)
+    // STRICT-ABORT: кандидат заявлен, но неразрешим — переход к следующему запрещён.
+    // Строка модели обязана иметь вид "provider/id" с непустыми частями, чтобы
+    // Provider.parseModel ниже по стеку не получал мусор.
+    const parts = model === undefined ? [] : model.split("/")
+    if (entry === undefined || model === undefined || model === "" || parts.length < 2 || parts.some((p) => p === "")) {
+      warnings.push(`candidate "${alias}" has no valid provider/model entry, role unresolved`)
+      return { warnings }
+    }
+    if (providersOff.has(model.split("/")[0])) continue
+    chosen = { model, entry }
+    break
+  }
+  if (!chosen) {
+    warnings.push("all candidates disabled, role unresolved")
+    return { warnings }
+  }
+  if (levelStr === undefined) return { model: chosen.model, warnings }
+  const mapping = isRecord(chosen.entry) ? chosen.entry.reasoning : undefined
+  const level = isRecord(mapping) ? mapping[String(Number(levelStr))] : undefined
+  if (typeof level !== "string" || level === "") {
+    warnings.push(`reasoning level ${Number(levelStr)} not found for selected model, applied without reasoning`)
+    return { model: chosen.model, warnings }
+  }
+  return { model: chosen.model, reasoning: level, warnings }
+}
+
 export const applyRegistry = Effect.fn("ConfigAgentModels.applyRegistry")(function* (
   defs: ConfigMerge.Definition[],
   registry: Registry,
@@ -239,6 +329,8 @@ export const applyRegistry = Effect.fn("ConfigAgentModels.applyRegistry")(functi
       yield* warn("role value is not a string")
       continue
     }
+    // builtin:<name> обслуживается applyBuiltinRoles — файловой цели у него нет.
+    if (key.startsWith("builtin:")) continue
     const sep = key.indexOf(":")
     if (sep <= 0) {
       yield* warn("role key must be prefix:path")
@@ -290,65 +382,64 @@ export const applyRegistry = Effect.fn("ConfigAgentModels.applyRegistry")(functi
     const current = def.frontmatter.model
     if (typeof current === "string" && current !== "") continue
 
-    const [capRaw, levelRaw] = value.includes(":") ? (value.split(/:(.*)/, 2) as [string, string]) : [value, undefined]
-    const cap = capRaw
-    const levelStr = levelRaw === "" ? "0" : levelRaw
-    if (levelStr !== undefined && !/^\d+$/.test(levelStr)) {
-      yield* warn(`invalid reasoning level "${levelStr}"`, { source: def.source })
-      continue
-    }
-
-    const candidates = registry.capabilities[cap]
-    if (!Array.isArray(candidates) || candidates.length === 0) {
-      yield* warn(`unknown capability "${cap}"`, { source: def.source })
-      continue
-    }
-
-    let chosen: { model: string; entry: unknown } | undefined
-    let aborted = false
-    for (const alias of candidates) {
-      if (typeof alias !== "string") {
-        yield* warn("capability candidate is not a string", { source: def.source })
-        aborted = true
-        break
-      }
-      if (modelsOff.has(alias)) continue
-      const entry = registry.models[alias]
-      const model = modelString(entry)
-      // STRICT-ABORT: кандидат заявлен, но неразрешим — переход к следующему запрещён.
-      // Строка модели обязана иметь вид "provider/id" с непустыми частями, чтобы
-      // Provider.parseModel ниже по стеку не получал мусор.
-      const parts = model === undefined ? [] : model.split("/")
-      if (entry === undefined || model === undefined || model === "" || parts.length < 2 || parts.some((p) => p === "")) {
-        yield* warn(`candidate "${alias}" has no valid provider/model entry, role unresolved`, { source: def.source })
-        aborted = true
-        break
-      }
-      if (providersOff.has(model.split("/")[0])) continue
-      chosen = { model, entry }
-      break
-    }
-    if (!chosen) {
-      if (!aborted) yield* warn("all candidates disabled, role unresolved", { source: def.source })
-      continue
-    }
+    const resolved = resolveRoleValue(registry, providersOff, modelsOff, value)
+    for (const message of resolved.warnings) yield* warn(message, { source: def.source })
+    if (resolved.model === undefined) continue
 
     // Frontmatter может быть общим объектом между Definition с байт-идентичным
     // содержимым .md (кэш gray-matter по строке) — клонируем перед мутацией,
     // чтобы назначение не протекло в чужой слой.
     def.frontmatter = { ...def.frontmatter }
-    def.frontmatter.model = chosen.model
+    def.frontmatter.model = resolved.model
+    if (resolved.reasoning !== undefined) def.frontmatter.reasoningEffort = resolved.reasoning
+  }
+})
 
-    if (levelStr === undefined) continue
-    const mapping = isRecord(chosen.entry) ? chosen.entry.reasoning : undefined
-    const level = isRecord(mapping) ? mapping[String(Number(levelStr))] : undefined
-    if (typeof level !== "string" || level === "") {
-      // Loose mode: reasoning недоступен, но модель применяется.
-      yield* warn(`reasoning level ${Number(levelStr)} not found for selected model, applied without reasoning`, {
-        source: def.source,
-      })
+// Встроенные агенты без .md-файла (plan/build/general/explore/title/summary/compaction)
+// назначаются ролью "builtin:<name>" через секцию agent конфига: значение
+// reasoningEffort нормализуется схемой в options.reasoningEffort — тот же канал,
+// что у .md-агентов. Явная модель в секции agent (opencode.json) побеждает —
+// гейт, эквивалентный frontmatter для файловых определений.
+const BUILTIN_AGENTS = ["plan", "build", "general", "explore", "title", "summary", "compaction"]
+
+export const applyBuiltinRoles = Effect.fn("ConfigAgentModels.applyBuiltinRoles")(function* (
+  agentSection: Record<string, unknown>,
+  registry: Registry,
+) {
+  const providersOff = disabledProviders(registry)
+  const modelsOff = new Set(registry.availability.disabledModels)
+  for (const [key, value] of Object.entries(registry.roles)) {
+    if (!key.startsWith("builtin:")) continue
+    const name = key.slice("builtin:".length)
+    const warn = (reason: string) =>
+      Effect.logWarning(`agent-models registry: ${reason}`, { role: key, builtin: name })
+    if (!BUILTIN_AGENTS.includes(name)) {
+      yield* warn("unknown builtin agent, role skipped")
       continue
     }
-    def.frontmatter.reasoningEffort = level
+    if (typeof value !== "string") {
+      yield* warn("role value is not a string")
+      continue
+    }
+    const resolved = resolveRoleValue(registry, providersOff, modelsOff, value)
+    for (const message of resolved.warnings) yield* warn(message)
+    if (resolved.model === undefined) continue
+    const current = agentSection[name]
+    const currentModel = isRecord(current) && typeof current.model === "string" ? current.model : undefined
+    if (currentModel !== undefined && currentModel !== "") continue
+    // reasoning пишется прямо в options: секция agent в result уже прошла
+    // normalize схемы (top-level reasoningEffort повторно не переносится).
+    agentSection[name] = {
+      ...(isRecord(current) ? current : {}),
+      model: resolved.model,
+      ...(resolved.reasoning !== undefined
+        ? {
+            options: {
+              ...(isRecord(current) && isRecord(current.options) ? current.options : {}),
+              reasoningEffort: resolved.reasoning,
+            },
+          }
+        : {}),
+    }
   }
 })

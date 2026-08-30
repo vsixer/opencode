@@ -77,6 +77,10 @@ export const Info = Schema.Struct({
   small_model: Schema.optional(Schema.String).annotate({
     description: "Small model to use for tasks like title generation in the format of provider/model",
   }),
+  agent_models: Schema.optional(Schema.String).annotate({
+    description:
+      "Path to the agent-models.jsonc registry file. Absolute or ~-relative. Takes precedence over the default search chain (.opencode/config in worktree/directory, then global config dir), but not over the OPENCODE_AGENT_MODELS env variable.",
+  }),
   default_agent: Schema.optional(Schema.String).annotate({
     description:
       "Default agent to use when none is specified. Must be a primary agent. Falls back to 'build' if not set or if the specified agent is invalid.",

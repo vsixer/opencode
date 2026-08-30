@@ -382,14 +382,14 @@ describe("unit: loadRegistry", () => {
     writeRegistry(
       configDir,
       registryText({ availability: { disabledProviders: ["b"], disabledModels: ["m"], weird: 1, prefixes: 1 } }),
-      "agent-models.local.jsonc",
+      "agent-models.disabled.jsonc",
     )
     const loaded = await loadNoEnv(instance(dir))
     if (loaded.status !== "ok") throw new Error("expected ok")
     expect(loaded.registry.availability.disabledProviders).toEqual(["a", "b"])
     expect(loaded.registry.availability.disabledModels).toEqual(["m", "m"])
 
-    writeRegistry(configDir, "nope", "agent-models.local.jsonc")
+    writeRegistry(configDir, "nope", "agent-models.disabled.jsonc")
     const broken = await loadNoEnv(instance(dir))
     if (broken.status !== "ok") throw new Error("expected ok")
     expect(broken.registry.availability.disabledProviders).toEqual(["a"])
@@ -399,11 +399,61 @@ describe("unit: loadRegistry", () => {
     const dir = tmp()
     const configDir = path.join(dir, ".opencode", "config")
     writeRegistry(configDir, registryText({ availability: { disabledProviders: ["a"] } }))
-    writeRegistry(configDir, JSON.stringify({ disabledProviders: ["b"], disabledModels: ["m"] }), "agent-models.local.jsonc")
+    writeRegistry(configDir, JSON.stringify({ disabledProviders: ["b"], disabledModels: ["m"] }), "agent-models.disabled.jsonc")
     const loaded = await loadNoEnv(instance(dir))
     if (loaded.status !== "ok") throw new Error("expected ok")
     expect(loaded.registry.availability.disabledProviders).toEqual(["a", "b"])
     expect(loaded.registry.availability.disabledModels).toEqual(["m"])
+  })
+
+  test("legacy overlay name applies with deprecation; new name wins when both exist", async () => {
+    const dir = tmp()
+    const configDir = path.join(dir, ".opencode", "config")
+    writeRegistry(configDir, registryText({ availability: { disabledProviders: ["a"] } }))
+    writeRegistry(configDir, JSON.stringify({ disabledProviders: ["legacy"] }), "agent-models.local.jsonc")
+    const viaLegacy = await loadNoEnv(instance(dir))
+    if (viaLegacy.status !== "ok") throw new Error("expected ok")
+    expect(viaLegacy.registry.availability.disabledProviders).toEqual(["a", "legacy"])
+
+    writeRegistry(configDir, JSON.stringify({ disabledProviders: ["new"] }), "agent-models.disabled.jsonc")
+    const both = await loadNoEnv(instance(dir))
+    if (both.status !== "ok") throw new Error("expected ok")
+    expect(both.registry.availability.disabledProviders).toEqual(["a", "new"])
+  })
+})
+
+describe("loader: agent_models config key", () => {
+  const loadWith = (dir: string, configPath?: string) =>
+    Effect.runPromise(ConfigAgentModels.loadRegistry(instance(dir), configPath)) as Promise<ConfigAgentModels.LoadedRegistry>
+
+  test("config key wins over worktree file, env wins over config key", async () => {
+    const dir = tmp()
+    writeRegistry(path.join(dir, ".opencode", "config"), registryText({ roles: { "p:agent/w.md": "cap" } }))
+    const configFile = writeRegistry(dir, registryText({ roles: { "p:agent/c.md": "cap" } }), "custom.jsonc")
+    const envFile = writeRegistry(dir, registryText({ roles: { "p:agent/e.md": "cap" } }), "env.jsonc")
+
+    const byConfig = await loadWith(dir, configFile)
+    if (byConfig.status !== "ok") throw new Error("expected ok")
+    expect(Object.keys(byConfig.registry.roles)).toEqual(["p:agent/c.md"])
+
+    await withEnv("OPENCODE_AGENT_MODELS", envFile, async () => {
+      const byEnv = await loadWith(dir, configFile)
+      if (byEnv.status !== "ok") throw new Error("expected ok")
+      expect(Object.keys(byEnv.registry.roles)).toEqual(["p:agent/e.md"])
+    })
+  })
+
+  test("missing config-key file and relative path fall through to worktree", async () => {
+    const dir = tmp()
+    writeRegistry(path.join(dir, ".opencode", "config"), registryText({ roles: { "p:agent/w.md": "cap" } }))
+
+    const missing = await loadWith(dir, path.join(dir, "nope.jsonc"))
+    if (missing.status !== "ok") throw new Error("expected ok")
+    expect(Object.keys(missing.registry.roles)).toEqual(["p:agent/w.md"])
+
+    const relative = await loadWith(dir, "relative/agent-models.jsonc")
+    if (relative.status !== "ok") throw new Error("expected ok")
+    expect(Object.keys(relative.registry.roles)).toEqual(["p:agent/w.md"])
   })
 })
 
@@ -422,6 +472,61 @@ describe("command reasoning pipeline", () => {
     const small = { reasoningEffort: "agent" }
     applyCommandReasoning(small, "high", true)
     expect(small.reasoningEffort).toBe("agent")
+  })
+})
+
+// --- builtin roles -------------------------------------------------------------
+
+describe("unit: applyBuiltinRoles", () => {
+  const base = {
+    prefixes: {},
+    models: {
+      m1: { model: "prov/m1", reasoning: { "2": "high" } },
+      m2: { model: "other/m2" },
+    },
+    capabilities: { cap: ["m1"], twocap: ["m1", "m2"] },
+    roles: {},
+    providerGroups: {},
+    availability: { disabledProviders: [], disabledModels: [] },
+  }
+
+  const run = (agent: Record<string, unknown>, roles: Record<string, string>) =>
+    Effect.runPromise(ConfigAgentModels.applyBuiltinRoles(agent, { ...base, roles }))
+
+  test("assigns model and reasoning to a missing agent entry", async () => {
+    const agent: Record<string, unknown> = {}
+    await run(agent, { "builtin:build": "cap:2" })
+    expect(agent.build).toEqual({ model: "prov/m1", options: { reasoningEffort: "high" } })
+  })
+
+  test("explicit model in agent section wins, other fields preserved", async () => {
+    const agent: Record<string, unknown> = { build: { model: "json/model", disable: true } }
+    await run(agent, { "builtin:build": "cap" })
+    expect(agent.build).toEqual({ model: "json/model", disable: true })
+  })
+
+  test("fills model into existing entry without model, preserving fields", async () => {
+    const agent: Record<string, unknown> = { plan: { disable: true } }
+    await run(agent, { "builtin:plan": "cap" })
+    expect(agent.plan).toEqual({ disable: true, model: "prov/m1" })
+  })
+
+  test("unknown builtin name is skipped", async () => {
+    const agent: Record<string, unknown> = {}
+    await run(agent, { "builtin:nope": "cap" })
+    expect(agent).toEqual({})
+  })
+
+  test("availability shifts builtin candidate", async () => {
+    const agent: Record<string, unknown> = {}
+    await Effect.runPromise(
+      ConfigAgentModels.applyBuiltinRoles(agent, {
+        ...base,
+        roles: { "builtin:title": "twocap" },
+        availability: { disabledProviders: ["prov"], disabledModels: [] },
+      }),
+    )
+    expect(agent.title).toEqual({ model: "other/m2" })
   })
 })
 
@@ -494,6 +599,54 @@ describe("integration: config pipeline", () => {
       expect(config.agent?.["x"]?.model).toBe("prov/m1")
     }),
   )
+
+  it.instance("agent_models config key routes the registry (opencode.json wins over worktree file)", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      writeProjectFiles(test.directory, {})
+      const external = path.join(test.directory, "external-models.jsonc")
+      fs.writeFileSync(
+        external,
+        registryText({
+          prefixes: { project: path.join(test.directory, ".opencode") },
+          models: { alt: { model: "alt/model" } },
+          capabilities: { altcap: ["alt"] },
+          roles: { "project:command/c.md": "altcap" },
+        }),
+      )
+      fs.writeFileSync(
+        path.join(test.directory, "opencode.json"),
+        JSON.stringify({ $schema: "https://opencode.ai/config.json", agent_models: external }),
+      )
+      const config = yield* Config.use.get()
+      expect(config.command?.["c"]?.model).toBe("alt/model")
+      expect(config.agent?.["x"]?.model).toBeUndefined()
+    }),
+  )
+
+  it.instance("builtin roles set agent section models through the full pipeline", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      writeProjectFiles(test.directory, { roles: { "builtin:build": "cap", "builtin:plan": "cap:2" } })
+      const config = yield* Config.use.get()
+      expect(config.agent?.["build"]?.model).toBe("prov/m1")
+      expect(config.agent?.["plan"]?.model).toBe("prov/m1")
+      expect((config.agent?.["plan"]?.options as Record<string, unknown>)?.reasoningEffort).toBe("high")
+    }),
+  )
+
+  it.instance("explicit agent model in opencode.json beats builtin role", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      writeProjectFiles(test.directory, { roles: { "builtin:build": "cap" } })
+      fs.writeFileSync(
+        path.join(test.directory, "opencode.json"),
+        JSON.stringify({ $schema: "https://opencode.ai/config.json", agent: { build: { model: "json/model" } } }),
+      )
+      const config = yield* Config.use.get()
+      expect(config.agent?.["build"]?.model).toBe("json/model")
+    }),
+  )
 })
 
 // --- reload -------------------------------------------------------------------
@@ -528,13 +681,13 @@ describe("reload", () => {
       writeRegistry(
         path.join(test.directory, ".opencode", "config"),
         registryText({ availability: { disabledModels: ["m1"] } }),
-        "agent-models.local.jsonc",
+        "agent-models.disabled.jsonc",
       )
       yield* reload(test.directory)
       const disabled = yield* Config.use.get()
       expect(disabled.agent?.["x"]?.model).toBeUndefined()
 
-      fs.rmSync(path.join(test.directory, ".opencode", "config", "agent-models.local.jsonc"))
+      fs.rmSync(path.join(test.directory, ".opencode", "config", "agent-models.disabled.jsonc"))
       yield* reload(test.directory)
       const enabled = yield* Config.use.get()
       expect(enabled.agent?.["x"]?.model).toBe("prov/m1")

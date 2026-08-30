@@ -1,26 +1,27 @@
-# Build aliases: `ocl`, `ocl-dev`, `ocl-build`
+# Build aliases: `oc`, `oc-dev`, `oc-build`, `oc-local`
 
-Three shell aliases defined in `~/.zshrc`. They point to locally-built binaries under `.ocl-builds/` (gitignored).
+Shell aliases defined in `~/.zshrc`. They point to locally-built binaries under `.ocl-builds/` (gitignored).
 
 | Alias | Build channel | Database file | Purpose |
 |---|---|---|---|
-| `ocl` | `latest` | `~/.local/share/opencode/opencode.db` | Production build. Sees the user's real session history. Use for daily work and verification. |
-| `ocl-dev` | `dev` (current git branch) | `~/.local/share/opencode/opencode-dev.db` | Dev build. Fully isolated from production data. Use for experiments and destructive changes. |
-| `ocl-build` | — | — | Rebuilds both binaries from current source. |
+| `oc` | `latest` | `~/.local/share/opencode/opencode.db` | Production fork build (alias repurposed from upstream opencode; upstream has no plain alias now). |
+| `oc-dev` | `dev` (current git branch) | `~/.local/share/opencode/opencode-dev.db` | Dev build. Fully isolated from production data. Use for experiments and destructive changes. |
+| `oc-build` | — | — | Rebuilds both binaries from current source. |
+| `oc-local` | `latest` | `~/.local/share/opencode/opencode.db` | Fork fully on the local LLM: `OPENCODE_AGENT_MODELS` → `~/.config/opencode/config/agent-models-local.jsonc` (every registry role, including `builtin:*` built-in agents, → `freetoken/nvidia/Qwen3.6-35B-A3B-NVFP4`). Note: the overlay `agent-models.disabled.jsonc` is shared per directory, so it applies to both registry files. |
 
 Layout:
 
 ```
 .ocl-builds/
   build.sh         # rebuild script (computes its own path; safe if repo moves)
-  prod/opencode    # binary for `ocl`
-  dev/opencode     # binary for `ocl-dev`
+  prod/opencode    # binary for `oc`
+  dev/opencode     # binary for `oc-dev`
 ```
 
 ## Rebuild after code changes
 
 ```
-ocl-build
+oc-build
 ```
 
 Both binaries update in place. Aliases do not need to change. Takes ~2–3 minutes.
@@ -48,9 +49,9 @@ To force any binary to use `opencode.db` regardless of its baked-in channel, set
 
 ## Important
 
-- Do not run experimental or destructive code paths via `ocl` — it shares the user's production database (`opencode.db`, ~18 GB of session history).
-- Use `ocl-dev` for any change that might corrupt sessions or trigger destructive migrations.
-- `ocl` and `ocl-dev` must never run at the same time against the same database file — both use SQLite WAL and concurrent access from two builds would corrupt it. Cross-channel isolation (different files) is safe; same-file concurrency is not.
+- Do not run experimental or destructive code paths via `oc` — it shares the user's production database (`opencode.db`, ~18 GB of session history).
+- Use `oc-dev` for any change that might corrupt sessions or trigger destructive migrations.
+- `oc` and `oc-dev` must never run at the same time against the same database file — both use SQLite WAL and concurrent access from two builds would corrupt it. Cross-channel isolation (different files) is safe; same-file concurrency is not.
 
 ## Bun version
 

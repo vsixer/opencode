@@ -6,6 +6,39 @@ Entries: newest first. Format: `YYYY-MM-DD — <feature>` with a link to `featur
 
 ---
 
+## 2026-08-30 — agent-models: оверлей переименован в agent-models.disabled.jsonc
+
+Оверлей списков отключений переименован из `agent-models.local.jsonc` (был похож
+на реестр oc-local `agent-models-local.jsonc`) в `agent-models.disabled.jsonc`.
+Старое имя читается как deprecated-fallback с warning-ом; при наличии обоих
+выигрывает новое. Миграция: переименовать файл рядом с реестрами и обновить
+write-путь в `/misc/sync-agent-models`. Подробности:
+[features/agent-models.md](features/agent-models.md).
+
+---
+
+## 2026-08-30 — agent-models: роли builtin для встроенных агентов
+
+Встроенные агенты без `.md` (`plan`/`build`/`general`/`explore`/`title`/`summary`/
+`compaction`) теперь назначаются реестром ролью `"builtin:<name>"`. Значение
+применяется к секции `agent` конфига: модель в `agent.<name>.model`, reasoning —
+в `options.reasoningEffort`. Явная модель в `opencode.json` остаётся
+приоритетнее роли. Резолвер файловых и builtin-ролей вынесен в общий код.
+Подробности: [features/agent-models.md](features/agent-models.md).
+
+---
+
+## 2026-08-30 — agent-models: ключ agent_models в opencode.json
+
+Путь к реестру теперь можно задать декларативно — ключом `agent_models` в
+`opencode.json` (глобальном или проектном), без env-переменной. Приоритет:
+`OPENCODE_AGENT_MODELS` (env) → `agent_models` → стандартная цепочка поиска.
+Принимаются абсолютные пути и формы от `~`; относительный путь или несуществующий
+файл — warning в логе и переход к следующему кандидату. Подробности:
+[features/agent-models.md](features/agent-models.md).
+
+---
+
 ## 2026-08-29 — agent-models: нативный реестр моделей агентов и команд
 
 Нативная поддержка `agent-models.jsonc` (env `OPENCODE_AGENT_MODELS` →
