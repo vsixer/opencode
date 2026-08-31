@@ -6,6 +6,17 @@ Entries: newest first. Format: `YYYY-MM-DD — <feature>` with a link to `featur
 
 ---
 
+## 2026-08-30 — agent-models: флаг force для режима принуждения
+
+Опциональный `force: true` в реестре перекрывает явную `model` во frontmatter
+`.md` (включая запечённую старым compile-скриптом — 66 глобальных файлов) и
+явную модель в секции `agent` конфига. Нужен режиму oc-local: без него
+frontmatter-гейт оставлял облачные модели из до-реестровой эпохи. По умолчанию
+выключен, приоритеты обычного реестра не изменились. Подробности:
+[features/agent-models.md](features/agent-models.md).
+
+---
+
 ## 2026-08-30 — agent-models: оверлей переименован в agent-models.disabled.jsonc
 
 Оверлей списков отключений переименован из `agent-models.local.jsonc` (был похож

@@ -151,6 +151,12 @@ describe("unit: applyRegistry", () => {
     expect(d.frontmatter.reasoningEffort).toBeUndefined()
   })
 
+  test("force overrides baked frontmatter model (oc-local semantics)", async () => {
+    const d = def({ model: "baked/cloud-model", reasoningEffort: "max" }, src("agent/x.md"))
+    await apply([d], { ...base, roles: { "p:agent/x.md": "cap" }, force: true })
+    expect(d.frontmatter.model).toBe("prov/m1")
+  })
+
   test("empty model string is treated as absent (A3)", async () => {
     const d = def({ model: "" }, src("agent/x.md"))
     await apply([d], { ...base, roles: { "p:agent/x.md": "cap" } })
@@ -488,6 +494,7 @@ describe("unit: applyBuiltinRoles", () => {
     roles: {},
     providerGroups: {},
     availability: { disabledProviders: [], disabledModels: [] },
+    force: false,
   }
 
   const run = (agent: Record<string, unknown>, roles: Record<string, string>) =>
@@ -527,6 +534,14 @@ describe("unit: applyBuiltinRoles", () => {
       }),
     )
     expect(agent.title).toEqual({ model: "other/m2" })
+  })
+
+  test("force overrides explicit agent-section model", async () => {
+    const agent: Record<string, unknown> = { build: { model: "json/model" } }
+    await Effect.runPromise(
+      ConfigAgentModels.applyBuiltinRoles(agent, { ...base, roles: { "builtin:build": "cap" }, force: true }),
+    )
+    expect(agent.build).toEqual({ model: "prov/m1" })
   })
 })
 

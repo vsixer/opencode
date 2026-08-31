@@ -47,9 +47,15 @@ disable/enable в `/misc/sync-agent-models`.
   "capabilities": { "cap": ["m1", "m2"] },
   "roles":     { "project:agent/x.md": "cap:2", "project:review/primary": "cap" },
   "providerGroups": { "cloud": ["prov"] },
-  "availability": { "disabledProviders": [], "disabledModels": [] }
+  "availability": { "disabledProviders": [], "disabledModels": [] },
+  "force": false
 }
 ```
+
+- `force: true` — режим принуждения (например, реестр oc-local): назначение
+  перекрывает явную `model` во frontmatter `.md` (включая запечённую старым
+  sync-скриптом) и явную модель в секции `agent` конфига. По умолчанию
+  выключен — явно заданная модель побеждает реестр.
 
 - Ключ роли — `prefix:путь/к/файлу.md`; матчатся и сокращённые формы (без
   сегмента `agent/agents/command/commands` и/или без `.md`) — детерминированный

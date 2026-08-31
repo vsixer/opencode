@@ -23,6 +23,10 @@ export type Registry = {
   roles: Record<string, string>
   providerGroups: Record<string, string[]>
   availability: { disabledProviders: string[]; disabledModels: string[] }
+  // Режим принуждения (например, реестр oc-local): назначение перекрывает
+  // явную model во frontmatter .md и в секции agent конфига. По умолчанию
+  // выключен — там побеждает явно заданная модель.
+  force: boolean
 }
 
 export type LoadedRegistry =
@@ -53,6 +57,7 @@ function emptyRegistry(): Registry {
     roles: {},
     providerGroups: {},
     availability: { disabledProviders: [], disabledModels: [] },
+    force: false,
   }
 }
 
@@ -64,6 +69,7 @@ function asRegistry(data: unknown): Registry {
   if (isRecord(data.capabilities)) registry.capabilities = data.capabilities as Record<string, string[]>
   if (isRecord(data.roles)) registry.roles = data.roles as Record<string, string>
   if (isRecord(data.providerGroups)) registry.providerGroups = data.providerGroups as Record<string, string[]>
+  if (typeof data.force === "boolean") registry.force = data.force
   if (isRecord(data.availability)) {
     const availability = data.availability as Record<string, unknown>
     if (Array.isArray(availability.disabledProviders)) registry.availability.disabledProviders = availability.disabledProviders
@@ -369,7 +375,7 @@ export const applyRegistry = Effect.fn("ConfigAgentModels.applyRegistry")(functi
       const analog = globalAnalogPath(expandHome(globalBaseRaw), base, target)
       if (analog && fs.existsSync(analog)) {
         const current = def.frontmatter.model
-        if (typeof current === "string" && current !== "") {
+        if (!registry.force && typeof current === "string" && current !== "") {
           yield* Effect.logWarning("agent-models registry: global analog exists, frontmatter model drifts from it", {
             role: key,
             source: def.source,
@@ -380,7 +386,7 @@ export const applyRegistry = Effect.fn("ConfigAgentModels.applyRegistry")(functi
     }
 
     const current = def.frontmatter.model
-    if (typeof current === "string" && current !== "") continue
+    if (!registry.force && typeof current === "string" && current !== "") continue
 
     const resolved = resolveRoleValue(registry, providersOff, modelsOff, value)
     for (const message of resolved.warnings) yield* warn(message, { source: def.source })
@@ -426,7 +432,7 @@ export const applyBuiltinRoles = Effect.fn("ConfigAgentModels.applyBuiltinRoles"
     if (resolved.model === undefined) continue
     const current = agentSection[name]
     const currentModel = isRecord(current) && typeof current.model === "string" ? current.model : undefined
-    if (currentModel !== undefined && currentModel !== "") continue
+    if (!registry.force && currentModel !== undefined && currentModel !== "") continue
     // reasoning пишется прямо в options: секция agent в result уже прошла
     // normalize схемы (top-level reasoningEffort повторно не переносится).
     agentSection[name] = {
