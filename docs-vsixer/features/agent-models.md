@@ -1,13 +1,31 @@
 # agent-models: нативный реестр моделей агентов и команд
 
-Status: implemented, 2026-08-29 (branch `question-form`).
+**Status:** implemented
+**Дата:** 2026-08-29 (обновлена 2026-08-31)
+**Branch:** `model-config`
+**Связанные:** [features/layered-merge.md](layered-merge.md) — global-analog наследует модель через fold; [features/config-reload.md](config-reload.md) — `/reload` перечитывает реестр
 
-Нативная поддержка реестра `agent-models.jsonc`: централизованное назначение
-моделей и reasoning-уровней агентам и командам через роли, с availability-гейтами
-и оверлеем. Заменяет внешний скрипт синка (`/misc/sync-agent-models` в MacroCRM)
-для read-пути: ядро само читает реестр при загрузке конфигурации и при `/reload`.
+## TL;DR
 
-## Цепочка поиска реестра
+Ядро нативно читает реестр `agent-models.jsonc` при загрузке конфигурации и при
+`/reload`: назначает модели и reasoning-уровни агентам и командам через роли
+`prefix:путь → capability[:N]` — с availability-гейтами, оверлеем отключений и
+builtin-ролями для агентов без `.md`. Заменяет compile-шаг sync-скрипта
+(`/misc/sync-agent-models` в MacroCRM) для read-пути: ядро ничего не пишет.
+
+## Мотивация
+
+До реестра модель и reasoning назначались compile-шагом: внешний скрипт
+`scripts/node/sync-agent-models.mjs` обрабатывал файл-реестр и записывал
+`model:` / `reasoningEffort:` прямо во frontmatter целевых `.md`-файлов. Это
+порождало обязательный шаг синхронизации, риск дрифта при ручных правках
+frontmatter и дублирование источника истины (реестр + запечённый frontmatter).
+Теперь реестр — единственный источник: ядро применяет его как fallback-слой
+над `.md`-файлами, ничего не переписывая на диске.
+
+## Поведение
+
+### Цепочка поиска реестра
 
 1. `OPENCODE_AGENT_MODELS` (env; отсутствующий путь/пустая строка/директория = «не найден»);
 2. ключ `agent_models` в `opencode.json` (глобальном или проектном; абсолютный путь или от `~`; относительный путь и несуществующий файл — warning и пропуск);
@@ -38,7 +56,7 @@ warning-ом до переименования файла; при наличии
 Миграция: переименовать файл рядом с каждым реестром и обновить write-путь
 disable/enable в `/misc/sync-agent-models`.
 
-## Формат и разрешение ролей
+### Формат и разрешение ролей
 
 ```jsonc
 {
@@ -72,7 +90,7 @@ disable/enable в `/misc/sync-agent-models`.
 - Глобальный аналог: локальный файл с глобальным двойником (`agents/x.md` при
   `prefixes.global`) не получает назначение — модель наследуется через fold.
 
-## Встроенные агенты (`builtin:` roles)
+### Встроенные агенты (`builtin:` roles)
 
 Встроенные агенты без `.md`-файла — `plan`, `build`, `general`, `explore`,
 `title`, `summary`, `compaction` — назначаются ролью `"builtin:<name>": "capability[:N]"`.
@@ -87,7 +105,7 @@ disable/enable в `/misc/sync-agent-models`.
 агента — warning и пропуск. Разрешение capability/кандидатов/availability —
 общее с файловыми ролями.
 
-## Reasoning команд (переходное окно)
+### Reasoning команд (переходное окно)
 
 - `reasoningEffort` во frontmatter команды игнорируется (вычищается до decode) —
   единственный источник reasoning команды — реестр. Поле в схеме команды —
@@ -97,7 +115,7 @@ disable/enable в `/misc/sync-agent-models`.
   модель-информацию user-сообщения).
 - Роль без `:N` — команда наследует reasoning агента.
 
-## Subtask-команды
+### Subtask-команды
 
 Reasoning роли subtask-команды (`subtask: true`) доезжает до дочерней сессии:
 уровень зеркалируется на assistant-сообщении родительского хода и передаётся в
@@ -106,22 +124,54 @@ Reasoning роли subtask-команды (`subtask: true`) доезжает д�
 агента и variant-наборы, `cap` без `:N` — дочерняя сессия наследует reasoning
 своего агента.
 
-## Внешние migration-notes (`/misc/sync-agent-models`, MacroCRM-репозиторий)
-
-- write-режим и drift-check пометить устаревшими: read-путь теперь нативный.
-- disable/enable переориентировать на оверлей рядом с файлом, найденным ядром
-  по цепочке (env → worktree → directory → global).
-- Утверждение «reasoningEffort left untouched (loose mode)» исправить: ядро
-  вычищает рукописный `reasoningEffort` команд; reasoning команды — только из
-  реестра.
-
 ## Расхождение с upstream
 
 Изменения в upstream-файлах (аддитивные): `packages/core/src/flag/flag.ts`
-(геттер `OPENCODE_AGENT_MODELS`), `packages/core/src/v1/config/command.ts`,
+(геттер `OPENCODE_AGENT_MODELS`), `packages/core/src/v1/config/config.ts`
+(ключ `agent_models`), `packages/core/src/v1/config/command.ts`,
 `packages/schema/src/{command.ts,v1/session.ts}` (опциональные поля
 `reasoningEffort`), `packages/opencode/src/config/config.ts` (хук post-scan),
 `packages/opencode/src/{command/index.ts,session/prompt.ts,session/llm/request.ts}`
 (конвейер reasoning команд), регенерированный `packages/client/src/generated`.
 Новые файлы форка: `packages/opencode/src/config/agent-models.ts`,
 `packages/opencode/test/config/agent-models.test.ts`.
+
+## Migration
+
+Внешние migration-notes (`/misc/sync-agent-models`, MacroCRM-репозиторий):
+
+- write-режим и drift-check пометить устаревшими: read-путь теперь нативный.
+- disable/enable переориентировать на оверлей рядом с файлом, найденным ядром
+  по цепочке (env → config key → worktree → directory → global).
+- Утверждение «reasoningEffort left untouched (loose mode)» исправить: ядро
+  вычищает рукописный `reasoningEffort` команд; reasoning команды — только из
+  реестра.
+
+Внутри репозитория opencode: one-off чистка — убрать `model`/`reasoningEffort`
+из файлов-ролей, реестр становится единственным источником.
+
+## Реализация
+
+- `packages/opencode/src/config/agent-models.ts` — схема реестра, загрузчик
+  (цепочка поиска + JSONC-парс + оверлей), резолвер файловых ролей
+  (`applyRegistry`, join-ключ — `Definition.source`) и builtin-ролей
+  (`applyBuiltinRoles`, применяется к сырой секции `agent` до decode).
+- `packages/opencode/src/config/config.ts` — хук post-scan/pre-fold внутри
+  `loadInstanceState`: strip рукописного `reasoningEffort` команд, инъекция
+  `model`/`reasoningEffort` в Definition, применение builtin-ролей; `/reload`
+  подхватывает изменения без отдельного вотчера.
+- `packages/opencode/src/command/index.ts` (`Command.Info.reasoningEffort`) +
+  `packages/opencode/src/session/prompt.ts` + `packages/opencode/src/session/llm/request.ts`
+  — конвейер reasoning команды до провайдера, включая subtask-передачу.
+- Тесты: `packages/opencode/test/config/agent-models.test.ts` — unit
+  (`applyRegistry`, `loadRegistry`, `applyBuiltinRoles`), loader config-key,
+  command reasoning pipeline, integration config pipeline, reload.
+
+## Open questions / future work
+
+- CLI для записи в реестр — не реализован; write-путь остаётся за внешним
+  тулингом (`/misc/sync-agent-models` disable/enable → оверлей).
+- Глобальное скрытие отключённых провайдеров/моделей из пикера — availability
+  влияет только на выбор кандидатами ролей; глобальное управление остаётся за
+  `disabled_providers` / blacklist.
+- upstream-PR не планируется.
