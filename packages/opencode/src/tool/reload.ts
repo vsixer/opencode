@@ -23,6 +23,15 @@ export const ReloadTool = Tool.define(
 
           const result = yield* reload.request()
 
+          // An immediate result means request() only flipped the reload state —
+          // the actual boot happens here through the service, mirroring the
+          // /reload HTTP endpoint (markInstanceForReload). Without this the
+          // executing event is published but no instance is ever reloaded, and
+          // the tui-bootstrap blocker keeps every later request queued forever.
+          if (result.immediate) {
+            yield* reload.execute(result.input)
+          }
+
           return {
             title: result.immediate ? "Configuration reload started" : "Configuration reload queued",
             output: result.immediate

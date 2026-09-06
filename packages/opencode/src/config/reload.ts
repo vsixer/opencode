@@ -38,6 +38,8 @@ export interface Interface {
   readonly completeBootstrap: (cycle: number) => Effect.Effect<boolean>
   readonly completeBootstrapForLocation: (input: LocationInput & { cycle: number }) => Effect.Effect<boolean>
   readonly request: () => Effect.Effect<RequestResult>
+  /** Runs the actual instance boot for an already-accepted immediate request. */
+  readonly execute: (input: InstanceStore.LoadInput) => Effect.Effect<void>
   readonly check: () => Effect.Effect<void>
 }
 
@@ -133,6 +135,14 @@ export const layer = Layer.effect(
       return { immediate: true, input: current.input, bootstrapCycle: execution.bootstrapCycle } satisfies RequestResult
     })
 
+    const execute = Effect.fn("ConfigReload.execute")(function* (input: InstanceStore.LoadInput) {
+      // Mirrors the /reload HTTP endpoint (markInstanceForReload): run the boot
+      // uninterruptibly in this fiber. Failures are ignored because request() has
+      // already advanced the reload state machine — it recovers through the
+      // bootstrap acknowledgement (or the client's fallback).
+      yield* store.reload(input).pipe(Effect.uninterruptible, Effect.ignore)
+    })
+
     const check = Effect.fn("ConfigReload.check")(function* () {
       const current = yield* currentInput()
       const state = getState(states, current.key)
@@ -159,6 +169,7 @@ export const layer = Layer.effect(
       completeBootstrap,
       completeBootstrapForLocation,
       request,
+      execute,
       check,
     })
   }),
@@ -255,8 +266,15 @@ function executePending(
   return Effect.gen(function* () {
     const execution = yield* prepareExecution(state, state.reloadInput ?? fallbackInput, events)
     // InstanceStore forks the new boot into its own scope before disposing the old
-    // instance. This effect may be interrupted by disposal, so no logic follows it.
-    yield* store.reload(execution.input).pipe(Effect.ignore)
+    // instance, so the boot itself survives this fiber — but the reload must still
+    // be detached from it. executePending runs inside finish(), i.e. the session
+    // runner's idle transition, BEFORE the turn response is delivered to the client
+    // (Runner finishRun runs onIdle ahead of completing the turn deferred), and
+    // tool-initiated reloads always take this deferred path. An inline boot would
+    // dispose the instance beneath that in-flight request and hang the client.
+    // A detached fiber starts only after the current fiber yields, so the turn
+    // unwinds first.
+    yield* Effect.forkDetach(store.reload(execution.input).pipe(Effect.ignore))
   })
 }
 

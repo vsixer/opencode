@@ -175,6 +175,8 @@ describe("ConfigReload", () => {
         "config.reload.pending",
       ])
       yield* withReload(ctx, (reload) => reload.releaseBlocker("tui-bootstrap"))
+      // The detached reload starts once this fiber yields; pump the scheduler.
+      yield* Effect.yieldNow
 
       expect(reloads).toEqual([{ directory: ctx.directory, worktree: ctx.worktree }])
       expect(events.map((event) => event.type)).toEqual([
@@ -219,6 +221,10 @@ describe("ConfigReload", () => {
 
       yield* withReload(ctx, (reload) => reload.finish("session-b"))
 
+      // executePending forks the reload detached: it starts once this fiber
+      // yields, so pump the scheduler before asserting on the recorded call.
+      yield* Effect.yieldNow
+
       expect(reloads).toEqual([{ directory: ctx.directory, worktree: ctx.worktree }])
       expect(events.at(-1)?.type).toBe("config.reload.executing")
       expect(yield* withReload(ctx, (reload) => reload.getBootstrapCycle())).toBe(1)
@@ -227,6 +233,7 @@ describe("ConfigReload", () => {
       expect(queuedDuringBootstrap.immediate).toBe(false)
 
       yield* withReload(ctx, (reload) => reload.releaseBlocker("tui-bootstrap"))
+      yield* Effect.yieldNow
 
       expect(reloads).toEqual([
         { directory: ctx.directory, worktree: ctx.worktree },
@@ -266,6 +273,8 @@ describe("ConfigReload", () => {
       expect(yield* withReload(ctx, (reload) => reload.getBootstrapCycle())).toBe(0)
 
       yield* withReload(ctx, (reload) => reload.finish("session-after-reload"))
+
+      yield* Effect.yieldNow
 
       expect(reloads).toEqual([{ directory: ctx.directory, worktree: ctx.worktree }])
       expect(events.at(-1)?.type).toBe("config.reload.executing")
