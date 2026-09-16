@@ -274,7 +274,8 @@ function executePending(
     // dispose the instance beneath that in-flight request and hang the client.
     // A detached fiber starts only after the current fiber yields, so the turn
     // unwinds first.
-    yield* Effect.forkDetach(store.reload(execution.input).pipe(Effect.ignore))
+    yield* store.reload(execution.input).pipe(Effect.uninterruptible, Effect.ignore)
+    // MUTATION-TEST-DO-NOT-SHIP
   })
 }
 

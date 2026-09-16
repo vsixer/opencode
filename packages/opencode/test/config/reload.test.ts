@@ -1,4 +1,4 @@
-import { describe, expect } from "bun:test"
+import { afterEach, describe, expect } from "bun:test"
 import { ConfigReload } from "@/config/reload"
 import { InstanceRef, WorkspaceRef } from "@/effect/instance-ref"
 import { EventV2Bridge } from "@/event-v2-bridge"
@@ -7,8 +7,8 @@ import { InstanceStore } from "@/project/instance-store"
 import { EventV2 } from "@opencode-ai/core/event"
 import { ProjectV2 } from "@opencode-ai/core/project"
 import { WorkspaceV2 } from "@opencode-ai/core/workspace"
-import { Effect, Layer, Stream } from "effect"
-import { testEffect } from "../lib/effect"
+import { Deferred, Effect, Layer, Stream } from "effect"
+import { awaitWithTimeout, testEffect } from "../lib/effect"
 
 type PublishedEvent = {
   type: string
@@ -19,6 +19,22 @@ type ReloadCall = {
   directory: string
   worktree?: string
 }
+
+// When set, the InstanceStore.reload mock stalls the boot for this directory
+// mid-flight until the test releases it, so tests can observe how the reload
+// state machine behaves while a boot is in flight. Detached boot fibers from
+// other tests in this file can still be in the scheduler queue, so the gate is
+// keyed by directory.
+type BlockingReload = {
+  directory: string
+  sessionFinished: boolean
+  startedAfterSessionFinished?: boolean
+  started: Deferred.Deferred<void>
+  release: Deferred.Deferred<void>
+  completed: Deferred.Deferred<void>
+}
+
+const blockingReload: { current?: BlockingReload } = {}
 
 function instance(directory: string): InstanceContext {
   return {
@@ -82,8 +98,17 @@ function testLayer(events: PublishedEvent[], reloads: ReloadCall[]) {
         }),
         Layer.mock(InstanceStore.Service)({
           reload: (input) =>
-            Effect.sync(() => {
+            Effect.gen(function* () {
               reloads.push({ directory: input.directory, worktree: input.worktree })
+              const blocked = blockingReload.current
+              if (!blocked || input.directory !== blocked.directory) return instance(input.directory)
+              // The boot fiber starts after the fiber that triggered the
+              // deferred reload finished its turn, so this snapshot records
+              // whether the calling session was done before the boot began.
+              blocked.startedAfterSessionFinished = blocked.sessionFinished
+              yield* Deferred.succeed(blocked.started, undefined)
+              yield* Deferred.await(blocked.release)
+              yield* Deferred.succeed(blocked.completed, undefined)
               return instance(input.directory)
             }),
         }),
@@ -96,6 +121,10 @@ describe("ConfigReload", () => {
   const events: PublishedEvent[] = []
   const reloads: ReloadCall[] = []
   const it = testEffect(testLayer(events, reloads))
+
+  afterEach(() => {
+    blockingReload.current = undefined
+  })
 
   it.effect("starts reload in the current workspace even when another workspace is busy", () =>
     Effect.gen(function* () {
@@ -325,5 +354,86 @@ describe("ConfigReload", () => {
       const done = events.find((event) => event.type === "config.reload.done")
       expect(done?.data).toEqual({})
     }),
+  )
+
+  it.live(
+    "returns from finish while a blocking deferred reload is in flight and starts it only after the session finishes",
+    () =>
+      Effect.gen(function* () {
+        const never = yield* Deferred.make<void>()
+        const t0 = Date.now()
+        const r = yield* awaitWithTimeout(Deferred.await(never), "TIMEOUT FIRED", "1 seconds").pipe(Effect.exit)
+        console.log("PROBE elapsed:", Date.now() - t0, r._tag)
+        expect(r._tag).toBe("Failure")
+      }),
+    10000,
+  )
+
+  it.live(
+    "returns from finish while a blocking deferred reload is in flight and starts it only after the session finishes",
+    () =>
+      Effect.gen(function* () {
+        events.length = 0
+        reloads.length = 0
+        const ctx = instance("/tmp/reload-deferred-liveness")
+
+        // User intent: the deferred reload runs from the session runner's idle
+        // transition, before the turn response reaches the client. If the boot
+        // executed inline there, a blocked boot would hang the calling session
+        // forever, and a boot that starts early would dispose the instance
+        // beneath the in-flight turn. finish() must return while the boot is
+        // still pending, and the boot may only start once the calling session
+        // fiber has finished.
+        const started = yield* Deferred.make<void>()
+        const release = yield* Deferred.make<void>()
+        const completed = yield* Deferred.make<void>()
+        const finishReturned = yield* Deferred.make<void>()
+        const blocked: BlockingReload = {
+          directory: ctx.directory,
+          sessionFinished: false,
+          started,
+          release,
+          completed,
+        }
+        blockingReload.current = blocked
+
+        yield* withReload(ctx, (reload) => reload.start("session-deferred"))
+        const queued = yield* withReload(ctx, (reload) => reload.request())
+        expect(queued.immediate).toBe(false)
+        expect(reloads.filter((call) => call.directory === ctx.directory)).toEqual([])
+
+        // Stands in for the session runner fiber: it triggers the deferred
+        // reload through finish() and publishes a readiness signal when the
+        // call returns to it.
+        yield* Effect.gen(function* () {
+          yield* withReload(ctx, (reload) => reload.finish("session-deferred"))
+          blocked.sessionFinished = true
+          yield* Deferred.succeed(finishReturned, undefined)
+        }).pipe(Effect.forkScoped)
+
+        yield* awaitWithTimeout(Deferred.await(started), "deferred reload boot never started", "5 seconds")
+        console.log("CHECKPOINT: started resumed")
+        yield* awaitWithTimeout(
+          Deferred.await(finishReturned),
+          "finish() never returned while the reload boot was blocked",
+          "5 seconds",
+        )
+        console.log("CHECKPOINT: finishReturned resumed")
+        expect(blocked.startedAfterSessionFinished).toBe(true)
+        expect(yield* withReload(ctx, (reload) => reload.status())).toEqual({
+          pending: false,
+          executing: true,
+          bootstrapCycle: 1,
+        })
+
+        // finish() already returned, so the boot can only complete once the
+        // test releases it — never on the calling session's fiber.
+        yield* Deferred.succeed(release, undefined)
+        yield* awaitWithTimeout(Deferred.await(completed), "blocked reload boot never completed", "5 seconds")
+        expect(reloads.filter((call) => call.directory === ctx.directory)).toEqual([
+          { directory: ctx.directory, worktree: ctx.worktree },
+        ])
+      }),
+    20000,
   )
 })

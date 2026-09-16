@@ -2,7 +2,7 @@
 description: "Hidden conflict-resolution subagent (secondary) for fork upstream sync. Called only by the release agent."
 mode: subagent
 hidden: true
-model: openai/gpt-5.6-sol
+model: polza/deepseek/deepseek-v4-pro
 temperature: 0.1
 reasoningEffort: high
 tools:

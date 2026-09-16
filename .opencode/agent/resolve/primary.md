@@ -2,7 +2,7 @@
 description: "Hidden conflict-resolution subagent (primary) for fork upstream sync. Called only by the release agent."
 mode: subagent
 hidden: true
-model: zai-coding-plan/glm-5.2
+model: openai/gpt-5.6-sol
 temperature: 0.1
 reasoningEffort: high
 tools:
