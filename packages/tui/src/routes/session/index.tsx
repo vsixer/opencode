@@ -39,7 +39,7 @@ import type {
 } from "@opencode-ai/sdk/v2"
 import { useLocal } from "../../context/local"
 import { Locale } from "../../util/locale"
-import { webSearchProviderLabel } from "../../util/tool-display"
+import { webSearchProviderLabel, reviewBatchItems, reviewBatchTerminal, type ReviewBatchChild } from "../../util/tool-display"
 import { Dynamic, useRenderer, useTerminalDimensions, type JSX } from "@opentui/solid"
 import { useSDK } from "../../context/sdk"
 import { useEditorContext } from "../../context/editor"
@@ -1835,6 +1835,9 @@ function ToolPart(props: { last: boolean; part: ToolPart; message: AssistantMess
         <Match when={display() === "skill"}>
           <Skill {...toolprops} />
         </Match>
+        <Match when={display() === "review_batch_run"}>
+          <ReviewBatchRun {...toolprops} />
+        </Match>
         <Match when={true}>
           <GenericTool {...toolprops} />
         </Match>
@@ -2382,6 +2385,138 @@ export function formatCompletedSubagentDetail(toolcalls: number, duration: strin
   return `${formatSubagentToolcalls(toolcalls)} · ${duration}`
 }
 
+// The review_batch_run tool streams queue progress through tool metadata: each
+// MR appears in `metadata.children` with its queue status and, once dispatched,
+// the child session executing it. Pending MRs come from the start input; resume
+// inputs carry none. Each dispatched child is synced once so its row can show
+// the live tool call, and clicking it navigates to that child session.
+function ReviewBatchRun(props: ToolProps) {
+  const { theme } = useTheme()
+  const sync = useSync()
+  const items = createMemo(() => reviewBatchItems(props.input, props.metadata))
+  const done = createMemo(() => items().filter((item) => reviewBatchTerminal(item.status)).length)
+  const label = createMemo(() => (items().length ? `${done()}/${items().length} MRs` : ""))
+
+  createEffect(() => {
+    for (const item of items()) {
+      if (!item.sessionID || reviewBatchTerminal(item.status)) continue
+      void sync.session.sync(item.sessionID)
+    }
+  })
+
+  return (
+    <>
+      <InlineTool
+        icon={props.part.state.status === "error" ? "✗" : props.part.state.status === "completed" ? "✓" : "│"}
+        color={props.part.state.status === "error" ? theme.error : undefined}
+        spinner={props.part.state.status === "pending" || props.part.state.status === "running"}
+        complete={label() || props.part.state.status === "completed"}
+        pending="Preparing MR queue…"
+        part={props.part}
+      >
+        review_batch_run {label()}
+      </InlineTool>
+      <Show when={items().length}>
+        <For each={items()}>{(item) => <ReviewBatchMrRow item={item} />}</For>
+      </Show>
+    </>
+  )
+}
+
+function ReviewBatchMrRow(props: { item: ReviewBatchChild }) {
+  const { theme } = useTheme()
+  const { navigate } = useRoute()
+  const sync = useSync()
+  const renderer = useRenderer()
+  const [hover, setHover] = createSignal(false)
+
+  const sessionID = createMemo(() => props.item.sessionID)
+  const messages = createMemo(() => sync.data.message[sessionID() ?? ""] ?? [])
+  const tools = createMemo(() =>
+    messages().flatMap((msg) =>
+      (sync.data.part[msg.id] ?? [])
+        .filter((part): part is ToolPart => part.type === "tool")
+        .map((part) => ({ tool: part.tool, state: part.state })),
+    ),
+  )
+  const current = createMemo(() =>
+    tools().findLast((x) => (x.state.status === "running" || x.state.status === "completed") && x.state.title),
+  )
+  const duration = createMemo(() => {
+    const first = messages().find((x) => x.role === "user")?.time.created
+    const assistant = messages().findLast((x) => x.role === "assistant")?.time.completed
+    if (!first || !assistant) return 0
+    return assistant - first
+  })
+  const waiting = createMemo(() => {
+    const id = sessionID()
+    if (!id) return undefined
+    if (sync.data.permission[id]?.length) return "waiting for permission"
+    if (sync.data.question[id]?.length) return "waiting for question"
+    return undefined
+  })
+  const failed = createMemo(() => props.item.status === "failed")
+  const clickable = createMemo(() => Boolean(sessionID()))
+  const color = createMemo(() => {
+    if (failed()) return theme.error
+    if (waiting()) return theme.warning
+    if (props.item.status === "completed" || props.item.status === "skipped" || props.item.status === "pending")
+      return theme.textMuted
+    return theme.text
+  })
+
+  const content = createMemo(() => {
+    const lines = [`MR !${props.item.iid} · ${props.item.status}`]
+    const live = current()
+    const liveTitle =
+      live && (live.state.status === "running" || live.state.status === "completed") ? live.state.title : undefined
+    if (waiting()) lines.push(`↳ ${waiting()}`)
+    else if (props.item.status === "completed" && messages().length)
+      lines.push(`↳ ${formatCompletedSubagentDetail(tools().length, Locale.duration(duration()))}`)
+    else if ((props.item.status === "failed" || props.item.status === "skipped") && props.item.error)
+      lines.push(`↳ ${Locale.truncate(props.item.error, 80)}`)
+    else if (props.item.status === "running") {
+      if (live && liveTitle !== undefined) lines.push(`↳ ${Locale.titlecase(live.tool)} ${liveTitle}`)
+      else if (tools().length) lines.push(`↳ ${formatSubagentToolcalls(tools().length)}`)
+    }
+    return lines.join("\n")
+  })
+
+  const glyph = createMemo(() => {
+    switch (props.item.status) {
+      case "completed":
+        return "✓"
+      case "failed":
+        return "✗"
+      case "skipped":
+        return "↷"
+      case "pending":
+        return "○"
+      default:
+        return "│"
+    }
+  })
+
+  return (
+    <InlineToolRow
+      icon={glyph()}
+      color={hover() && clickable() ? theme.text : color()}
+      complete={true}
+      pending=""
+      spinner={props.item.status === "running" && !waiting() && !failed()}
+      onMouseOver={() => clickable() && setHover(true)}
+      onMouseOut={() => setHover(false)}
+      onMouseUp={() => {
+        if (renderer.getSelection()?.getSelectedText()) return
+        const id = sessionID()
+        if (id) navigate({ type: "session", sessionID: id })
+      }}
+    >
+      {content()}
+    </InlineToolRow>
+  )
+}
+
 type ExecuteCall = { tool: string; status: "running" | "completed" | "error"; input?: Record<string, unknown> }
 
 function executeCalls(value: unknown): ExecuteCall[] {
@@ -2693,6 +2828,7 @@ const toolDisplays = new Set([
   "question",
   "skill",
   "execute",
+  "review_batch_run",
 ])
 
 export function toolDisplay(tool: string) {
