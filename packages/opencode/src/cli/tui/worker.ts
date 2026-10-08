@@ -9,6 +9,7 @@ import { writeHeapSnapshot } from "node:v8"
 import { Heap } from "@/cli/heap"
 import { AppRuntime } from "@/effect/app-runtime"
 import { Effect } from "effect"
+import { errorMessage } from "@/util/error"
 import { disposeAllInstancesAndEmitGlobalDisposed } from "@/server/global-lifecycle"
 
 Heap.start()
@@ -27,25 +28,69 @@ GlobalBus.on("event", (event) => {
 
 let server: Awaited<ReturnType<typeof Server.listen>> | undefined
 
+// Активные SSE-потоки: id запроса → контроллер прерывания. fetchAbort рвёт
+// запрос на стороне сервера (сигнал прокинут в Request).
+const activeStreams = new Map<number, AbortController>()
+
 export const rpc = {
-  async fetch(input: { url: string; method: string; headers: Record<string, string>; body?: string }) {
+  async fetch(input: { id: number; url: string; method: string; headers: Record<string, string>; body?: string }) {
     const headers = { ...input.headers }
     const auth = ServerAuth.header()
     if (auth && !headers["authorization"] && !headers["Authorization"]) {
       headers["Authorization"] = auth
     }
+    const controller = new AbortController()
+    activeStreams.set(input.id, controller)
     const request = new Request(input.url, {
       method: input.method,
       headers,
       body: input.body,
+      signal: controller.signal,
     })
     const response = await Server.Default().app.fetch(request)
-    const body = await response.text()
-    return {
-      status: response.status,
-      headers: Object.fromEntries(response.headers.entries()),
-      body,
+    const responseHeaders = Object.fromEntries(response.headers.entries())
+    // SSE-ответы стримятся rpc-событиями (fetch.start/chunk/end): TUI получает
+    // кадры по мере генерации ответа, а не всё тело разом. Прежнее поведение —
+    // await response.text() — буферизовало весь стрим до его завершения, из-за
+    // чего ответы btw рисовались одним куском в конце тура, а AbortSignal
+    // клиента не доходил до сервера. Не-SSE ответы буферизуются как раньше.
+    if (!response.headers.get("content-type")?.includes("text/event-stream")) {
+      activeStreams.delete(input.id)
+      const body = await response.text()
+      return { buffered: true as const, status: response.status, headers: responseHeaders, body }
     }
+    void (async () => {
+      try {
+        Rpc.emit("fetch.start", { id: input.id, status: response.status, headers: responseHeaders })
+        const decoder = new TextDecoder()
+        if (response.body) {
+          const reader = response.body.getReader()
+          try {
+            while (true) {
+              const { done, value } = await reader.read()
+              if (done) break
+              const text = decoder.decode(value, { stream: true })
+              if (text) Rpc.emit("fetch.chunk", { id: input.id, text })
+            }
+            const tail = decoder.decode()
+            if (tail) Rpc.emit("fetch.chunk", { id: input.id, text: tail })
+          } finally {
+            reader.releaseLock()
+          }
+        }
+        Rpc.emit("fetch.end", { id: input.id })
+      } catch (error) {
+        Rpc.emit("fetch.error", { id: input.id, message: errorMessage(error) ?? "stream failed" })
+      } finally {
+        activeStreams.delete(input.id)
+      }
+    })()
+    return { buffered: false as const, status: response.status, headers: responseHeaders }
+  },
+  async fetchAbort(input: { id: number }) {
+    const controller = activeStreams.get(input.id)
+    activeStreams.delete(input.id)
+    controller?.abort()
   },
   snapshot() {
     const result = writeHeapSnapshot("server.heapsnapshot")

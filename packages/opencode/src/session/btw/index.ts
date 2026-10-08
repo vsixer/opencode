@@ -34,6 +34,7 @@ import type { Agent as AgentModule } from "@/agent/agent"
 import type { ModelMessage } from "ai"
 
 import type { BtwPart } from "./schema"
+import { SIDE_CHAT_INSTRUCTION, freezeSnapshot } from "./snapshot"
 
 // === Константы =============================================================
 
@@ -214,6 +215,7 @@ const makeHandle = (
         if (idx >= 0) turn.parts[idx] = updated
         yield* Queue.offer(queue, {
           type: "tool",
+          btwID: state.btwID,
           messageID: turn.assistant.id as unknown as string,
           callID,
           tool: updated.tool,
@@ -237,6 +239,7 @@ const makeHandle = (
         }
         yield* Queue.offer(queue, {
           type: "tool",
+          btwID: state.btwID,
           messageID: turn.assistant.id as unknown as string,
           callID,
           tool: part.tool,
@@ -269,6 +272,7 @@ const onEvent = (state: BtwState, turn: TurnCtx, queue: Queue.Queue<BtwPart, Cau
         turn.currentText.text += delta
         yield* Queue.offer(queue, {
           type: "text-delta",
+          btwID: state.btwID,
           messageID: turn.assistant.id as unknown as string,
           delta,
         })
@@ -278,7 +282,7 @@ const onEvent = (state: BtwState, turn: TurnCtx, queue: Queue.Queue<BtwPart, Cau
         if (!turn.currentText) return
         const end = Date.now()
         turn.currentText.time = { start: turn.currentText.time?.start ?? end, end }
-        yield* Queue.offer(queue, { type: "text-end", messageID: turn.assistant.id as unknown as string })
+        yield* Queue.offer(queue, { type: "text-end", btwID: state.btwID, messageID: turn.assistant.id as unknown as string })
         turn.currentText = undefined
         return
       }
@@ -289,6 +293,7 @@ const onEvent = (state: BtwState, turn: TurnCtx, queue: Queue.Queue<BtwPart, Cau
       case "reasoning-delta": {
         yield* Queue.offer(queue, {
           type: "reasoning-delta",
+          btwID: state.btwID,
           messageID: turn.assistant.id as unknown as string,
           delta: (event as { text: string }).text,
         })
@@ -354,6 +359,7 @@ const onEvent = (state: BtwState, turn: TurnCtx, queue: Queue.Queue<BtwPart, Cau
           turn.parts.push(part)
           yield* Queue.offer(queue, {
             type: "tool",
+            btwID: state.btwID,
             messageID: turn.assistant.id as unknown as string,
             callID: v.id,
             tool: v.name,
@@ -379,6 +385,7 @@ const onEvent = (state: BtwState, turn: TurnCtx, queue: Queue.Queue<BtwPart, Cau
           }
           yield* Queue.offer(queue, {
             type: "tool",
+            btwID: state.btwID,
             messageID: turn.assistant.id as unknown as string,
             callID: v.id,
             tool: part.tool,
@@ -396,7 +403,7 @@ const onEvent = (state: BtwState, turn: TurnCtx, queue: Queue.Queue<BtwPart, Cau
         const message = (event as { message: string }).message
         turn.errored = true
         yield* Effect.logError("btw provider error", { ...btwLogCtx(state), error: message })
-        yield* Queue.offer(queue, { type: "error", message })
+        yield* Queue.offer(queue, { type: "error", btwID: state.btwID, message })
         return
       }
       default:
@@ -470,7 +477,7 @@ const runTurn = (state: BtwState, queue: Queue.Queue<BtwPart, Cause.Done>) =>
         Effect.gen(function* () {
           turn.errored = true
           yield* Effect.logError("btw stream error", { ...btwLogCtx(state), error: Cause.squash(cause) })
-          yield* Queue.offer(queue, { type: "error", message: errorMessage(cause) ?? "stream error" })
+          yield* Queue.offer(queue, { type: "error", btwID: state.btwID, message: errorMessage(cause) ?? "stream error" })
         }),
       ),
     )
@@ -479,6 +486,7 @@ const runTurn = (state: BtwState, queue: Queue.Queue<BtwPart, Cause.Done>) =>
     state.conversation.push({ info: assistant, parts: turn.parts })
     yield* Queue.offer(queue, {
       type: "assistant-end",
+      btwID: state.btwID,
       messageID: assistant.id as unknown as string,
       finish: assistant.finish,
     })
@@ -503,13 +511,13 @@ const runLoop = (state: BtwState, queue: Queue.Queue<BtwPart, Cause.Done>) =>
         Effect.catchCause((cause) =>
           Effect.gen(function* () {
             yield* Effect.logError("btw turn error", { ...btwLogCtx(state), error: Cause.squash(cause) })
-            yield* Queue.offer(queue, { type: "error", message: errorMessage(cause) ?? "turn error" })
+            yield* Queue.offer(queue, { type: "error", btwID: state.btwID, message: errorMessage(cause) ?? "turn error" })
             return "stop" as const
           }),
         ),
       )
     }
-    yield* Queue.offer(queue, { type: "turn-end" })
+    yield* Queue.offer(queue, { type: "turn-end", btwID: state.btwID })
   }).pipe(
     // Серверный wall-clock таймаут тура убран: основная сессия opencode его не
     // имеет, и 120s обрывали легитимно долгие ответы. Лимит шагов берётся из
@@ -552,9 +560,13 @@ export const open = Effect.fn("Btw.open")(function* (input: { parentID: SessionI
   if (!providerID || !modelID) return yield* new ParentNoModelError({ message: "btw: parent session has no model" })
   const model = yield* providerSvc.getModel(providerID, modelID).pipe(Effect.orDie)
 
-  const base = yield* MessageV2.filterCompactedEffect(input.parentID).pipe(
-    Effect.provideService(Database.Service, database),
-    Effect.orDie,
+  // Изоляция панелей: снимок замораживается на последнем завершённом ходе
+  // родителя — незавершённый ход в срез не попадает (см. snapshot.ts).
+  const frozen = freezeSnapshot(
+    yield* MessageV2.filterCompactedEffect(input.parentID).pipe(
+      Effect.provideService(Database.Service, database),
+      Effect.orDie,
+    ),
   )
 
   const permission = parent.permission ?? agent.permission
@@ -564,7 +576,7 @@ export const open = Effect.fn("Btw.open")(function* (input: { parentID: SessionI
     instruction.system().pipe(Effect.orDie),
     sys.mcp(agent, permission),
   ]).pipe(Effect.orDie)
-  const system = [...env, ...instructions, ...(mcp ? [mcp] : []), ...(skills ? [skills] : [])]
+  const system = [...env, ...instructions, ...(mcp ? [mcp] : []), ...(skills ? [skills] : []), SIDE_CHAT_INSTRUCTION]
 
   const btwID = "btw_" + nonce()
   const btwSessionID = newBtwSessionID()
@@ -579,7 +591,7 @@ export const open = Effect.fn("Btw.open")(function* (input: { parentID: SessionI
     model,
     permission,
     system,
-    base,
+    base: frozen,
     conversation: [],
     directory: ctx.directory,
     worktree: ctx.worktree,
@@ -600,17 +612,17 @@ export const runSend = Effect.fn("Btw.send")(function* (input: {
 }) {
   const state = store.get(input.btwID)
   if (!state) {
-    yield* Queue.offer(input.queue, { type: "error", message: "btw: not found" })
+    yield* Queue.offer(input.queue, { type: "error", btwID: input.btwID, message: "btw: not found" })
     yield* Queue.end(input.queue)
     return
   }
   if (state.closed) {
-    yield* Queue.offer(input.queue, { type: "error", message: "btw: closed" })
+    yield* Queue.offer(input.queue, { type: "error", btwID: state.btwID, message: "btw: closed" })
     yield* Queue.end(input.queue)
     return
   }
   if (state.busy) {
-    yield* Queue.offer(input.queue, { type: "warning", message: "previous turn is still running" })
+    yield* Queue.offer(input.queue, { type: "warning", btwID: state.btwID, message: "previous turn is still running" })
     yield* Queue.end(input.queue)
     return
   }
@@ -619,7 +631,12 @@ export const runSend = Effect.fn("Btw.send")(function* (input: {
   state.activeQueue = input.queue
   const userMsg = makeUserMessage(state, input.text)
   state.conversation.push(userMsg)
-  yield* Queue.offer(input.queue, { type: "user", id: userMsg.info.id as unknown as string, text: input.text })
+  yield* Queue.offer(input.queue, {
+    type: "user",
+    btwID: state.btwID,
+    id: userMsg.info.id as unknown as string,
+    text: input.text,
+  })
   // Гонка с abort-сигналом: при /btw/abort или Btw.close deferred завершается,
   // правая ветка побеждает, runLoop прерывается, его ensuring дренирует очередь
   // (Queue.end => нормальный EOF для клиента) и снимает busy.
@@ -635,7 +652,7 @@ export const close = Effect.fn("Btw.close")(function* (input: { btwID: string })
     const queue = state.activeQueue
     const deferred = state.abortDeferred
     if (queue && deferred) {
-      yield* Queue.offer(queue, { type: "closed" })
+      yield* Queue.offer(queue, { type: "closed", btwID: state.btwID })
       yield* Deferred.succeed(deferred, undefined)
     }
     store.delete(input.btwID)
@@ -651,7 +668,7 @@ export const abort = Effect.fn("Btw.abort")(function* (input: { btwID: string })
   const queue = state?.activeQueue
   const deferred = state?.abortDeferred
   if (queue && deferred) {
-    yield* Queue.offer(queue, { type: "error", message: "btw: aborted" })
+    yield* Queue.offer(queue, { type: "error", btwID: input.btwID, message: "btw: aborted" })
     yield* Deferred.succeed(deferred, undefined)
   }
   return { ok: true }

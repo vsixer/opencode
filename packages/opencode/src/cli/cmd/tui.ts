@@ -21,20 +21,118 @@ declare global {
 
 type RpcClient = ReturnType<typeof Rpc.client<typeof rpc>>
 
+// Транспорт fetch через worker. Не-SSE ответы приходят целиком в rpc.result;
+// SSE-ответы стримятся rpc-событиями (fetch.start/chunk/end/error), поэтому
+// кадры ответа доходят в TUI по мере генерации, а init.signal рвёт запрос
+// через rpc.fetchAbort.
 function createWorkerFetch(client: RpcClient): typeof fetch {
+  const encoder = new TextEncoder()
+  let nextStreamId = 0
+  type StreamState = {
+    status?: number
+    headers?: Record<string, string>
+    queue: string[]
+    closed: boolean
+    error?: string
+    push?: (text: string) => void
+    finish?: () => void
+  }
+  const streams = new Map<number, StreamState>()
+  const state = (id: number): StreamState => {
+    let stream = streams.get(id)
+    if (!stream) {
+      stream = { queue: [], closed: false }
+      streams.set(id, stream)
+    }
+    return stream
+  }
+  const finish = (stream: StreamState) => {
+    stream.closed = true
+    stream.push = undefined
+    const hook = stream.finish
+    stream.finish = undefined
+    hook?.()
+  }
+  client.on<{ id: number; status: number; headers: Record<string, string> }>("fetch.start", (event) => {
+    const stream = state(event.id)
+    stream.status = event.status
+    stream.headers = event.headers
+  })
+  client.on<{ id: number; text: string }>("fetch.chunk", (event) => {
+    const stream = state(event.id)
+    if (stream.closed) return
+    if (stream.push) stream.push(event.text)
+    else stream.queue.push(event.text)
+  })
+  client.on<{ id: number }>("fetch.end", (event) => {
+    finish(state(event.id))
+  })
+  client.on<{ id: number; message: string }>("fetch.error", (event) => {
+    const stream = state(event.id)
+    stream.error = event.message
+    finish(stream)
+  })
+
   const fn = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const request = new Request(input, init)
     const body = request.body ? await request.text() : undefined
-    const result = await client.call("fetch", {
-      url: request.url,
-      method: request.method,
-      headers: Object.fromEntries(request.headers.entries()),
-      body,
-    })
-    return new Response(result.body, {
-      status: result.status,
-      headers: result.headers,
-    })
+    const id = nextStreamId++
+    // abort живёт весь ответ: для SSE — до закрытия/отмены стрима, для
+    // буферизованных — до возврата Response.
+    const abort = () => {
+      void client.call("fetchAbort", { id }).catch(() => {})
+    }
+    init?.signal?.addEventListener("abort", abort, { once: true })
+    const off = () => init?.signal?.removeEventListener("abort", abort)
+    try {
+      const result = await client.call("fetch", {
+        id,
+        url: request.url,
+        method: request.method,
+        headers: Object.fromEntries(request.headers.entries()),
+        body,
+      })
+      if (result.buffered) {
+        off()
+        return new Response(result.body, { status: result.status, headers: result.headers })
+      }
+      const stream = state(id)
+      const response = new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            for (const text of stream.queue.splice(0)) controller.enqueue(encoder.encode(text))
+            if (stream.closed) {
+              if (stream.error) controller.error(new Error(stream.error))
+              else controller.close()
+              streams.delete(id)
+              off()
+              return
+            }
+            stream.push = (text) => controller.enqueue(encoder.encode(text))
+            stream.finish = () => {
+              streams.delete(id)
+              off()
+              if (stream.error) controller.error(new Error(stream.error))
+              else controller.close()
+            }
+          },
+          cancel() {
+            stream.closed = true
+            stream.push = undefined
+            stream.finish = undefined
+            streams.delete(id)
+            off()
+            abort()
+          },
+        }),
+        { status: result.status, headers: result.headers },
+      )
+      return response
+    } catch (error) {
+      streams.delete(id)
+      off()
+      throw error
+    }
   }
   return fn as typeof fetch
 }
