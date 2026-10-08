@@ -77,6 +77,16 @@
 - Двухканальный обрыв: локальный `AbortController` рвёт fetch немедленно, серверный `/btw/abort` надёжен при half-open SSE.
 - Таймауты: hard 60s (полностью глухое зависание), inactivity 30s (нет чанков).
 
+### Изоляция панелей
+
+Основная панель и btw **независимы в обоих направлениях**: открытие btw не влияет на маршрут, отображение и сохранение ответов основной сессии, и наоборот.
+
+- **Заморозка снимка.** `Btw.open` срезает контекст родителя по последний **завершённый** ход (`freezeSnapshot` в `session/btw/snapshot.ts`): незавершённый ход — висящий вопрос без ответа или частичный ответ — в снимок не попадает. Иначе модель btw продолжает родительскую задачу, и её «ответ» печатается в btw-панели, теряясь для основной.
+- **Инструкция side-chat.** В системный промпт btw добавляется явный запрет продолжать/возобновлять родительскую задачу (`SIDE_CHAT_INSTRUCTION`).
+- **Владение кадрами.** Каждый кадр SSE-стрима btw несёт `btwID` (сервер проставляет во все `BtwPart`); панель отбрасывает кадры с чужим `btwID` — смешение разговоров невозможно даже при ошибке доставки. Требование поля схемой — компиляционная гарантия: новый эмиттер без `btwID` не скомпилируется.
+- **Стриминговый транспорт.** В worker-режиме TUI SSE-ответы больше не буферизуются целиком (`await response.text()`): `/btw/send` стримится rpc-событиями `fetch.start/chunk/end/error` по мере генерации, а `AbortSignal` клиента доходит до сервера через `rpc.fetchAbort`. Затронуты `cli/cmd/tui.ts` (клиентская сборка `Response` из событий) и `cli/tui/worker.ts` (серверная перекачка кадров).
+- **Гонка закрытия.** Если панель размонтировалась до ответа `/btw/open`, полученный «поздний» `btwID` закрывается на сервере — беседа не остаётся висеть в памяти.
+
 ### Жизненный цикл
 
 - **In-memory, без персистенции.** При открытии панель вызывает `btw.open({parentID})` → сервер создаёт новый `btwID`. История живёт только в памяти.
@@ -105,15 +115,18 @@ btw — **полностью fork-фича**, в `anomalyco/opencode` её не�
 | `packages/tui/src/component/prompt/index.tsx` | + prop `yieldFocus` + ветка в автофокус-эффекте. |
 | `packages/tui/src/config/keybind.ts` | + `session_btw_close: <leader>p` + `CommandMap.session_btw_close`. |
 | `packages/tui/src/ui/dialog.tsx` | удалён btw-only `setOnEscape`/`onEscape` (чистка после ухода от модалки). |
+| `packages/opencode/src/cli/cmd/tui.ts` | `createWorkerFetch`: SSE-ответы собираются из rpc-событий (`fetch.start/chunk/end/error`), `init.signal` → `rpc.fetchAbort`; не-SSE — буферизованно как раньше. |
+| `packages/opencode/src/cli/tui/worker.ts` | `rpc.fetch`: стриминг SSE-ответов в TUI rpc-событиями вместо полной буферизации `response.text()`; сигнал прерывания в `Request`; + `rpc.fetchAbort`. |
 
 ### Fork-owned файлы (новые)
 
 | Файл | Назначение |
 |---|---|
 | `packages/tui/src/context/btw.tsx` | `BtwProvider`: `state()`/`open`/`close`, `ref()`/`setRef` для цикла фокуса. |
-| `packages/tui/src/routes/session/panel-btw.tsx` | `BtwPanel`: стрим/timeout/abort, рендер (markdown + подсветка, сворачиваемый thinking, индикатор хода, спинсер), ref поля ввода. |
-| `packages/opencode/src/session/btw/index.ts` | Сервер: HttpApi-группа `/btw` (`open`/`send`/`close`/`abort`), in-memory store keyed by `btwID`, заморозка контекста parent-сессии. |
-| `packages/opencode/src/session/btw/schema.ts` | Серверные схемы (`BtwOpenRequest`, chunk'и стрима и т.д.). |
+| `packages/tui/src/routes/session/panel-btw.tsx` | `BtwPanel`: стрим/abort, проверка владения кадрами (`btwID`), рендер (markdown + подсветка, сворачиваемый thinking, индикатор хода, спинсер), ref поля ввода. |
+| `packages/opencode/src/session/btw/index.ts` | Сервер: HttpApi-группа `/btw` (`open`/`send`/`close`/`abort`), in-memory store keyed by `btwID`, заморозка контекста parent-сессии, штамп `btwID` на кадрах стрима. |
+| `packages/opencode/src/session/btw/schema.ts` | Серверные схемы (`BtwOpenRequest`, chunk'и стрима и т.д.); каждый кадр несёт `btwID`. |
+| `packages/opencode/src/session/btw/snapshot.ts` | `freezeSnapshot` (срез снимка по последний завершённый ход родителя) + `SIDE_CHAT_INSTRUCTION`. |
 
 `packages/tui/src/routes/session/dialog-btw.tsx` (бывшая модалка) удалён — логика перенесена в `panel-btw.tsx`.
 
@@ -176,6 +189,7 @@ component/prompt/index.tsx
 ```
 sdk.client.btw.send({btwID, text}, {signal: turnAbort})
   → SSE: for await (chunk of resp.stream)
+      → if (chunk.btwID !== id) continue      // изоляция: чужие кадры отбрасываются
       → handlePart(chunk, assistantId)
           reason-delta → patchAssistant(reasoning += delta)
           text-delta   → patchAssistant(text += delta)

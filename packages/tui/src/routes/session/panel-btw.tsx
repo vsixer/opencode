@@ -11,14 +11,17 @@ import { useBindings, useCommandShortcut } from "../../keymap"
 import { useTuiConfig } from "../../config"
 
 // Форма чанков стрима /btw (серверная схема BtwPart, см. session/btw/schema.ts).
+// Каждый кадр несёт btwID: панель отбрасывает кадры чужой беседы — изоляция
+// разговоров проверяется на клиенте, а не только на сервере.
 type BtwChunk =
   | { type: "ready"; btwID: string; parentID: string }
-  | { type: "user"; id: string; text: string }
-  | { type: "text-delta"; messageID: string; delta: string }
-  | { type: "reasoning-delta"; messageID: string; delta: string }
-  | { type: "text-end"; messageID: string }
+  | { type: "user"; btwID: string; id: string; text: string }
+  | { type: "text-delta"; btwID: string; messageID: string; delta: string }
+  | { type: "reasoning-delta"; btwID: string; messageID: string; delta: string }
+  | { type: "text-end"; btwID: string; messageID: string }
   | {
       type: "tool"
+      btwID: string
       messageID: string
       callID: string
       tool: string
@@ -27,11 +30,11 @@ type BtwChunk =
       output?: string
       error?: string
     }
-  | { type: "assistant-end"; messageID: string; finish?: string }
-  | { type: "turn-end" }
-  | { type: "error"; message: string }
-  | { type: "warning"; message: string }
-  | { type: "closed" }
+  | { type: "assistant-end"; btwID: string; messageID: string; finish?: string }
+  | { type: "turn-end"; btwID: string }
+  | { type: "error"; btwID: string; message: string }
+  | { type: "warning"; btwID: string; message: string }
+  | { type: "closed"; btwID: string }
 
 type ToolEntry = {
   callID: string
@@ -78,16 +81,27 @@ export function BtwPanel(props: { parentID: string; width: number }) {
   // прерванного fetch, оставляя чистый «btw: aborted».
   let userAborted = false
 
+  // Флаг размонтирования: open() может разрешиться после onCleanup — тогда
+  // серверную беседу надо закрыть по полученному id, иначе она висит в памяти
+  // сервера до рестарта.
+  let disposed = false
+
   onMount(async () => {
     try {
       const res = await sdk.client.btw.open({ parentID: props.parentID }, { throwOnError: true })
-      setBtwID(res.data!.btwID)
+      const opened = res.data!.btwID
+      if (disposed) {
+        sdk.client.btw.close({ btwID: opened }).catch(() => {})
+        return
+      }
+      setBtwID(opened)
     } catch (e) {
-      setError("btw: failed to open — " + errMessage(e))
+      if (!disposed) setError("btw: failed to open — " + errMessage(e))
     }
   })
 
   onCleanup(() => {
+    disposed = true
     abort.abort()
     turnAbort?.abort()
     btw.setRef(undefined)
@@ -246,13 +260,14 @@ export function BtwPanel(props: { parentID: string; width: number }) {
     setMessages((m) => [...m, { role: "user", id: "u" + Date.now(), text }])
     const assistantId = appendAssistant()
     pendingPatch = { text: "", reasoning: "", tools: [] }
-    // Per-turn abort связывает только panel-level abort (размонтирование панели)
-    // и ручной аборт пользователя. Никаких клиентских таймаутов/inactivity нет —
-    // как в основной сессии: модель работает сколько нужно, а зависший провайдер
-    // пользователь прерывает сам (interrupt-клавиша). Серверский лимит шагов
-    // берётся из унаследованного агента (state.agent.steps ?? Infinity).
-    turnAbort = new AbortController()
-    const onPanelAbort = () => turnAbort?.abort()
+    // Per-turn abort связывает panel-level abort (размонтирование панели) и
+    // ручной аборт пользователя. Никаких клиентских таймаутов/inactivity нет —
+    // как в основной сессии. Контроллер — локальная константа тура: мутирующий
+    // общий turnAbort пропустил бы late-кадры предыдущего ответа в сообщение
+    // нового тура. turnAbort остаётся зеркалом для abortTurn и onCleanup.
+    const myAbort = new AbortController()
+    turnAbort = myAbort
+    const onPanelAbort = () => myAbort.abort()
     abort.signal.addEventListener("abort", onPanelAbort)
     const classifyAbort = (): string | undefined => {
       if (userAborted) return "btw: aborted"
@@ -264,11 +279,14 @@ export function BtwPanel(props: { parentID: string; width: number }) {
     // классификацией обрыва.
     let terminated = false
     try {
-      const resp = await sdk.client.btw.send({ btwID: id, text }, { signal: turnAbort.signal, sseMaxRetryAttempts: 0 })
+      const resp = await sdk.client.btw.send({ btwID: id, text }, { signal: myAbort.signal, sseMaxRetryAttempts: 0 })
       let streamChunkCount = 0
       for await (const raw of resp.stream) {
-        if (turnAbort?.signal.aborted) break
+        if (myAbort.signal.aborted || disposed) break
         const part = raw as unknown as BtwChunk
+        // Изоляция панелей: кадр чужой беседы (например, закрытой до нас)
+        // игнорируется целиком — текст с другой панели не может попасть сюда.
+        if ("btwID" in part && part.btwID !== id) continue
         handlePart(part, assistantId)
         streamChunkCount++
         if (streamChunkCount % FLUSH_EVERY === 0) {
