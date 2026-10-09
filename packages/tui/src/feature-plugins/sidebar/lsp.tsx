@@ -5,22 +5,21 @@ import { createMemo, For, Show, createSignal } from "solid-js"
 const id = "internal:sidebar-lsp"
 
 function View(props: { api: TuiPluginApi }) {
-  const [open, setOpen] = createSignal(true)
+  // Свернут по умолчанию независимо от количества серверов
+  const [open, setOpen] = createSignal(false)
   const theme = () => props.api.theme.current
   const list = createMemo(() => props.api.state.lsp())
   const off = createMemo(() => !props.api.state.config.lsp)
 
   return (
     <box>
-      <box flexDirection="row" gap={1} onMouseDown={() => list().length > 2 && setOpen((x) => !x)}>
-        <Show when={list().length > 2}>
-          <text fg={theme().text}>{open() ? "▼" : "▶"}</text>
-        </Show>
+      <box flexDirection="row" gap={1} onMouseDown={() => setOpen((x) => !x)}>
+        <text fg={theme().text}>{open() ? "▼" : "▶"}</text>
         <text fg={theme().text}>
           <b>LSP</b>
         </text>
       </box>
-      <Show when={list().length <= 2 || open()}>
+      <Show when={open()}>
         <Show when={list().length === 0}>
           <text fg={theme().textMuted}>{off() ? "LSPs are disabled" : "LSPs will activate as files are read"}</text>
         </Show>
