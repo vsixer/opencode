@@ -1,5 +1,5 @@
 import { createStore } from "solid-js/store"
-import { createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js"
+import { createEffect, createMemo, createSignal, For, on, onCleanup, onMount, Show } from "solid-js"
 import { useRenderer } from "@opentui/solid"
 import type { TextareaRenderable } from "@opentui/core"
 import { selectedForeground, tint, useTheme } from "../../context/theme"
@@ -11,7 +11,24 @@ import { useBindings, useOpencodeModeStack } from "../../keymap"
 
 const QUESTION_MODE = "question"
 
-export function QuestionPrompt(props: { request: QuestionRequest; directory?: string }) {
+type QuestionDraft = {
+  tab: number
+  answers: QuestionAnswer[]
+  custom: string[]
+  selected: number
+  editing: boolean
+  text: string
+}
+
+// Черновик ответа живёт вне компонента: при переходе в сессию субагента маршрут
+// сменяется и QuestionPrompt размонтируется, теряя локальный store.
+const drafts = new Map<string, QuestionDraft>()
+
+export function QuestionPrompt(props: {
+  request: QuestionRequest
+  directory?: string
+  onResolve?: (id: string) => void
+}) {
   const sdk = useSDK()
   const { theme } = useTheme()
   const renderer = useRenderer()
@@ -22,15 +39,33 @@ export function QuestionPrompt(props: { request: QuestionRequest; directory?: st
   const single = createMemo(() => questions().length === 1 && questions()[0]?.multiple !== true)
   const tabs = createMemo(() => (single() ? 1 : questions().length + 1)) // questions + confirm tab (no confirm for single select)
   const [tabHover, setTabHover] = createSignal<number | "confirm" | null>(null)
+  const draft = drafts.get(props.request.id)
   const [store, setStore] = createStore({
-    tab: 0,
-    answers: [] as QuestionAnswer[],
-    custom: [] as string[],
-    selected: 0,
-    editing: false,
+    tab: draft?.tab ?? 0,
+    // Клонируем массивы: Map не должен разделять mutable-ссылки со store
+    answers: draft ? draft.answers.map((a) => [...a]) : ([] as QuestionAnswer[]),
+    custom: draft ? [...draft.custom] : ([] as string[]),
+    selected: draft?.selected ?? 0,
+    editing: draft?.editing ?? false,
   })
+  let pendingRestore = draft?.editing ? draft.text : undefined
+
+  // id дублируется в plain-переменную: props сносятся до запуска onCleanup,
+  // а черновик сохраняется именно там.
+  let requestID = props.request.id
+  createEffect(
+    on(
+      () => props.request.id,
+      (id) => {
+        requestID = id
+      },
+    ),
+  )
+  // Терминальное действие выполнено: onCleanup удаляет черновик вместо повторного снимка.
+  let terminal = false
 
   let textarea: TextareaRenderable | undefined
+  const [editTarget, setEditTarget] = createSignal<TextareaRenderable>()
 
   const question = createMemo(() => questions()[store.tab])
   const confirm = createMemo(() => !single() && store.tab === questions().length)
@@ -45,6 +80,9 @@ export function QuestionPrompt(props: { request: QuestionRequest; directory?: st
     return store.answers[store.tab]?.includes(value) ?? false
   })
 
+  // Терминальные ветки сначала отправляют ответ серверу и только потом уведомляют
+  // роут: локальное скрытие формы размонтирует компонент, и сбой в этом пути
+  // не должен рвать доставку ответа — иначе агент зависает в ожидании reply.
   function submit() {
     const answers = questions().map((_, i) => store.answers[i] ?? [])
     void sdk.client.question.reply({
@@ -52,6 +90,8 @@ export function QuestionPrompt(props: { request: QuestionRequest; directory?: st
       directory: props.directory,
       answers,
     })
+    terminal = true
+    notifyResolved()
   }
 
   function reject() {
@@ -59,6 +99,17 @@ export function QuestionPrompt(props: { request: QuestionRequest; directory?: st
       requestID: props.request.id,
       directory: props.directory,
     })
+    terminal = true
+    notifyResolved()
+  }
+
+  // Уведомление роута выполняется синхронно и размонтирует форму внутри записи
+  // сигнала родителя; исключение из чужого cleanup не должно всплывать
+  // дальше в обработчик клавиш.
+  function notifyResolved() {
+    try {
+      props.onResolve?.(requestID)
+    } catch {}
   }
 
   function pick(answer: string, custom: boolean = false) {
@@ -76,6 +127,8 @@ export function QuestionPrompt(props: { request: QuestionRequest; directory?: st
         directory: props.directory,
         answers: [[answer]],
       })
+      terminal = true
+      notifyResolved()
       return
     }
     setStore("tab", store.tab + 1)
@@ -125,13 +178,93 @@ export function QuestionPrompt(props: { request: QuestionRequest; directory?: st
     pick(opt.label)
   }
 
+  // Отправка свободного ответа: commit повторяет логику старого return-хендлера,
+  // затем продвижение к следующему вопросу или финальный submit.
+  function submitEdit() {
+    const text = textarea?.plainText?.trim() ?? ""
+    if (!text) {
+      // Пустой submit снимает предыдущий свободный ответ с этой вкладки.
+      const prev = store.custom[store.tab]
+      if (prev) {
+        const inputs = [...store.custom]
+        inputs[store.tab] = ""
+        setStore("custom", inputs)
+
+        const answers = [...store.answers]
+        answers[store.tab] = (answers[store.tab] ?? []).filter((x) => x !== prev)
+        setStore("answers", answers)
+      }
+      setStore("editing", false)
+      return
+    }
+    const prev = store.custom[store.tab]
+    const wasLast = store.tab >= questions().length - 1
+
+    if (multi()) {
+      const inputs = [...store.custom]
+      inputs[store.tab] = text
+      setStore("custom", inputs)
+
+      const existing = store.answers[store.tab] ?? []
+      const next = [...existing]
+      if (prev) {
+        const index = next.indexOf(prev)
+        if (index !== -1) next.splice(index, 1)
+      }
+      if (!next.includes(text)) next.push(text)
+      const answers = [...store.answers]
+      answers[store.tab] = next
+      setStore("answers", answers)
+    } else {
+      pick(text, true)
+    }
+
+    setStore("editing", false)
+    pendingRestore = undefined
+    if (single()) return
+    if (wasLast) {
+      submit()
+      return
+    }
+    // multi-ветка выше не сдвигает вкладку сама — сдвигаем здесь;
+    // для одиночного выбора сдвиг уже сделан внутри pick()
+    if (multi()) selectTab(store.tab + 1)
+  }
+
+  // Возврат к вариантам с сохранением набранного текста: при повторном входе
+  // в editing он восстанавливается через pendingRestore в ref textarea.
+  function exitEditing() {
+    const text = textarea?.plainText ?? ""
+    if (text) pendingRestore = text
+    setStore("editing", false)
+  }
+
   onMount(() => {
     const popMode = modeStack.push(QUESTION_MODE)
     onCleanup(popMode)
   })
 
+  onCleanup(() => {
+    if (terminal) {
+      drafts.delete(requestID)
+      return
+    }
+    drafts.set(requestID, {
+      tab: store.tab,
+      answers: store.answers.map((a) => [...a]),
+      custom: [...store.custom],
+      selected: store.selected,
+      editing: store.editing,
+      text: store.editing ? (textarea?.plainText ?? "") : "",
+    })
+  })
+
   useBindings(() => ({
     mode: QUESTION_MODE,
+    // target+priority побеждают global managed textarea layer, который иначе
+    // перехватывает return как submit (паттерн annotation-editor.tsx).
+    target: editTarget,
+    priority: 1,
     enabled: store.editing && !confirm(),
     commands: [
       {
@@ -147,62 +280,30 @@ export function QuestionPrompt(props: { request: QuestionRequest; directory?: st
           textarea?.setText("")
         },
       },
+      // Основной блок, регистрирующий app.exit, disabled во время editing —
+      // без локальной регистрации ctrl+c проваливается в базовый app_exit
+      // и закрывает приложение вместо отклонения вопроса.
+      {
+        name: "app.exit",
+        title: "Reject question",
+        category: "Question",
+        run() {
+          reject()
+        },
+      },
     ],
     bindings: [
-      {
-        key: "escape",
-        desc: "Cancel answer edit",
-        group: "Question",
-        cmd: () => {
-          setStore("editing", false)
-        },
-      },
+      { key: "alt+return", desc: "Submit answer", group: "Question", cmd: () => submitEdit() },
+      // Enter — перенос строки, отправка только по alt+enter
+      { key: "return", desc: "New line", group: "Question", cmd: () => textarea?.newLine() },
+      { key: "shift+escape", desc: "Back to options", group: "Question", cmd: () => exitEditing() },
+      // Без явной no-op привязки escape проваливается в базовый слой,
+      // где он обозначает session_interrupt и прерывает сессию агента
+      // прямо во время ввода ответа.
+      { key: "escape", group: "Question", cmd: () => {} },
+      { key: "ctrl+return", group: "Question", cmd: () => {} },
+      ...tuiConfig.keybinds.get("app.exit"),
       ...tuiConfig.keybinds.get("prompt.clear"),
-      {
-        key: "return",
-        desc: "Submit answer edit",
-        group: "Question",
-        cmd: () => {
-          const text = textarea?.plainText?.trim() ?? ""
-          const prev = store.custom[store.tab]
-
-          if (!text) {
-            if (prev) {
-              const inputs = [...store.custom]
-              inputs[store.tab] = ""
-              setStore("custom", inputs)
-
-              const answers = [...store.answers]
-              answers[store.tab] = (answers[store.tab] ?? []).filter((x) => x !== prev)
-              setStore("answers", answers)
-            }
-            setStore("editing", false)
-            return
-          }
-
-          if (multi()) {
-            const inputs = [...store.custom]
-            inputs[store.tab] = text
-            setStore("custom", inputs)
-
-            const existing = store.answers[store.tab] ?? []
-            const next = [...existing]
-            if (prev) {
-              const index = next.indexOf(prev)
-              if (index !== -1) next.splice(index, 1)
-            }
-            if (!next.includes(text)) next.push(text)
-            const answers = [...store.answers]
-            answers[store.tab] = next
-            setStore("answers", answers)
-            setStore("editing", false)
-            return
-          }
-
-          pick(text, true)
-          setStore("editing", false)
-        },
-      },
     ],
   }))
 
@@ -250,7 +351,9 @@ export function QuestionPrompt(props: { request: QuestionRequest; directory?: st
         ...(confirm()
           ? [
               { key: "return", desc: "Submit answer", group: "Question", cmd: () => submit() },
-              { key: "escape", desc: "Reject question", group: "Question", cmd: () => reject() },
+              // no-op: глотаем escape, чтобы он не провалился в базовый session_interrupt
+              { key: "escape", group: "Question", cmd: () => {} },
+              { key: "shift+escape", desc: "Reject question", group: "Question", cmd: () => reject() },
               ...tuiConfig.keybinds.get("app.exit"),
             ]
           : [
@@ -278,7 +381,9 @@ export function QuestionPrompt(props: { request: QuestionRequest; directory?: st
               { key: "down", desc: "Next answer", group: "Question", cmd: () => moveTo((store.selected + 1) % total) },
               { key: "j", desc: "Next answer", group: "Question", cmd: () => moveTo((store.selected + 1) % total) },
               { key: "return", desc: "Select answer", group: "Question", cmd: () => selectOption() },
-              { key: "escape", desc: "Reject question", group: "Question", cmd: () => reject() },
+              // no-op: глотаем escape, чтобы он не провалился в базовый session_interrupt
+              { key: "escape", group: "Question", cmd: () => {} },
+              { key: "shift+escape", desc: "Reject question", group: "Question", cmd: () => reject() },
               ...tuiConfig.keybinds.get("app.exit"),
             ]),
       ],
@@ -427,10 +532,18 @@ export function QuestionPrompt(props: { request: QuestionRequest; directory?: st
                       <textarea
                         ref={(val: TextareaRenderable) => {
                           textarea = val
+                          setEditTarget(val)
                           val.traits = { status: "ANSWER" }
                           queueMicrotask(() => {
                             val.focus()
                             val.gotoLineEnd()
+                            // Сброс обязателен: textarea пересоздаётся при каждом
+                            // повторном входе в editing, и «залипший» restore
+                            // перезатёр бы новый ввод.
+                            if (pendingRestore !== undefined) {
+                              val.setText(pendingRestore)
+                              pendingRestore = undefined
+                            }
                           })
                         }}
                         initialValue={input()}
@@ -506,7 +619,7 @@ export function QuestionPrompt(props: { request: QuestionRequest; directory?: st
           </text>
 
           <text fg={theme.text}>
-            esc <span style={{ fg: theme.textMuted }}>dismiss</span>
+            shift+esc <span style={{ fg: theme.textMuted }}>dismiss</span>
           </text>
         </box>
       </box>
