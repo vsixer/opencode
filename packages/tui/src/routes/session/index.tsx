@@ -249,7 +249,10 @@ export function Session() {
     // Вопросы всплывают из любого потомка (task → subagent → …), а не только от
     // прямых детей: иначе вопрос из вложенного субагента не виден в корневой
     // сессии и агент выглядит «просто работающим».
+    // Включая саму сессию: вопрос может быть задан корневой сессией напрямую
+    // (children() апстрима тоже включал self через x.id === parentID).
     const ids = new Set<string>()
+    if (session()?.id) ids.add(session()!.id)
     const collect = (parentID: string) => {
       for (const x of sync.data.session) {
         if (x.parentID !== parentID) continue
