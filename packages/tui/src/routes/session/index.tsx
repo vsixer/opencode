@@ -246,7 +246,19 @@ export function Session() {
   })
   const questions = createMemo(() => {
     if (session()?.parentID) return []
-    return children().flatMap((x) => sync.data.question[x.id] ?? [])
+    // Вопросы всплывают из любого потомка (task → subagent → …), а не только от
+    // прямых детей: иначе вопрос из вложенного субагента не виден в корневой
+    // сессии и агент выглядит «просто работающим».
+    const ids = new Set<string>()
+    const collect = (parentID: string) => {
+      for (const x of sync.data.session) {
+        if (x.parentID !== parentID) continue
+        ids.add(x.id)
+        collect(x.id)
+      }
+    }
+    collect(session()?.id)
+    return [...ids].flatMap((id) => sync.data.question[id] ?? [])
   })
   const [resolvedQuestionID, setResolvedQuestionID] = createSignal<string>()
   const activeQuestions = createMemo(() => questions().filter((q) => q.id !== resolvedQuestionID()))
