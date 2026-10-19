@@ -252,7 +252,7 @@ export function Session() {
     // Включая саму сессию: вопрос может быть задан корневой сессией напрямую
     // (children() апстрима тоже включал self через x.id === parentID).
     const ids = new Set<string>()
-    if (session()?.id) ids.add(session()!.id)
+    const sessionID = session()?.id
     const collect = (parentID: string) => {
       for (const x of sync.data.session) {
         if (x.parentID !== parentID) continue
@@ -260,7 +260,10 @@ export function Session() {
         collect(x.id)
       }
     }
-    collect(session()?.id)
+    if (sessionID) {
+      ids.add(sessionID)
+      collect(sessionID)
+    }
     return [...ids].flatMap((id) => sync.data.question[id] ?? [])
   })
   const [resolvedQuestionID, setResolvedQuestionID] = createSignal<string>()
