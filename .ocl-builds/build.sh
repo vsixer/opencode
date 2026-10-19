@@ -37,10 +37,11 @@ fork_version() {
   printf '%s\n' "${base}+vsixer"
 }
 
-# Сборка одной платформой (--single) создаёт dist/opencode-{os}-{arch}/bin/opencode.
+# Сборка одной платформой (--single) создаёт dist/{pkg}-{os}-{arch}/bin/opencode
+# (upstream переименовал артефакт opencode-* → cli-* после переезда пакета).
 find_binary() {
   local found
-  found=$(ls "$PKG"/dist/opencode-*/bin/opencode 2>/dev/null | head -n1 || true)
+  found=$(ls "$PKG"/dist/*/bin/opencode 2>/dev/null | head -n1 || true)
   if [[ -z "$found" ]]; then
     echo "ERROR: собранный бинарь не найден в $PKG/dist" >&2
     exit 1
