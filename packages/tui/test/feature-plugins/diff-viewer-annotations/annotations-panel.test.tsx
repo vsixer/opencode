@@ -2,22 +2,16 @@
 // Изолированный рендер AnnotationsPanel (test.md 006): футер подсказок и чистый
 // хедер, basename-заголовки групп с коллизиями, чистая колонка номеров строк.
 import { describe, expect, test } from "bun:test"
-import { onCleanup } from "solid-js"
-import { createDefaultOpenTuiKeymap } from "@opentui/keymap/opentui"
-import { testRender, useRenderer } from "@opentui/solid"
-import type { TuiPluginApi } from "@opencode-ai/plugin/tui"
-import { KVProvider } from "../../../src/context/kv"
-import { ThemeProvider } from "../../../src/context/theme"
-import { DEFAULT_THEMES, resolveTheme } from "../../../src/theme"
-import { TuiConfigProvider } from "../../../src/config"
-import { OpencodeKeymapProvider, registerOpencodeKeymap } from "../../../src/keymap"
+import { testRender } from "@opentui/solid"
+import { Keymap } from "../../../src/context/keymap"
+import { ThemeProvider, useThemes } from "../../../src/context/theme"
+import { ConfigProvider } from "../../../src/config"
 import { AnnotationsPanel } from "../../../src/feature-plugins/system/diff-viewer-annotations/annotations-panel"
 import type { Annotation, AnnotationStore } from "../../../src/feature-plugins/system/diff-viewer-annotations/store"
-import { createTuiPluginApi } from "../../fixture/tui-plugin"
+import type { DiffAnnotationsApi } from "../../../src/feature-plugins/system/diff-viewer-annotations/api"
 import { createTuiResolvedConfig } from "../../fixture/tui-runtime"
 import { TestTuiContexts } from "../../fixture/tui-environment"
-
-const resolvedTheme = resolveTheme(DEFAULT_THEMES.opencode, "dark")
+import { emptyThemeSource } from "../../fixture/fixture"
 
 // Панель читает из стора только visibleAnnotations — минимальная заглушка без
 // дублирования логики стора в тесте.
@@ -55,31 +49,38 @@ async function renderPanel(
   width = 40,
 ): Promise<string> {
   const config = createTuiResolvedConfig()
-  const api = createTuiPluginApi({ theme: { current: resolvedTheme } as unknown as TuiPluginApi["theme"] })
   function Harness() {
-    const renderer = useRenderer()
-    const keymap = createDefaultOpenTuiKeymap(renderer)
-    onCleanup(registerOpencodeKeymap(keymap, renderer, config))
+    function Content() {
+      // Живая тема из того же резолва, что рисует панель; остальной срез api
+      // панели не нужен — заглушка.
+      const api = {
+        theme: useThemes().currentTokens(),
+        data: { session: { get: () => undefined, message: { list: () => [] } } },
+        ui: { toast: { show: () => {} } },
+        client: {},
+      } as unknown as DiffAnnotationsApi
+      return (
+        <AnnotationsPanel
+          api={api}
+          store={fakeStore(annotations)}
+          files={() => files.map((file) => ({ file }))}
+          active={() => true}
+          onEdit={() => {}}
+          onDelete={() => {}}
+          onJump={() => {}}
+          onClose={() => {}}
+        />
+      )
+    }
     return (
       <TestTuiContexts>
-        <OpencodeKeymapProvider keymap={keymap}>
-          <TuiConfigProvider config={config}>
-            <KVProvider>
-              <ThemeProvider mode="dark">
-                <AnnotationsPanel
-                  api={api}
-                  store={fakeStore(annotations)}
-                  files={() => files.map((file) => ({ file }))}
-                  active={() => true}
-                  onEdit={() => {}}
-                  onDelete={() => {}}
-                  onJump={() => {}}
-                  onClose={() => {}}
-                />
-              </ThemeProvider>
-            </KVProvider>
-          </TuiConfigProvider>
-        </OpencodeKeymapProvider>
+        <ConfigProvider config={config}>
+          <Keymap.Provider>
+            <ThemeProvider mode="dark" source={emptyThemeSource}>
+              <Content />
+            </ThemeProvider>
+          </Keymap.Provider>
+        </ConfigProvider>
       </TestTuiContexts>
     )
   }

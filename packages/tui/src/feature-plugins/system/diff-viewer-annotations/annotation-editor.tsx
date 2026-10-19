@@ -1,16 +1,16 @@
 /** @jsxImportSource @opentui/solid */
 import { TextAttributes, TextareaRenderable } from "@opentui/core"
 import { Show, createEffect, createMemo, createSignal, on, onMount } from "solid-js"
-import type { TuiPluginApi } from "@opencode-ai/plugin/tui"
-import { useBindings } from "../../../keymap"
+import type { DiffAnnotationsApi } from "./api"
+import { useBindings } from "@opentui/keymap/solid"
 import type { AnnotationStore } from "./store"
 
 // Модальное multiline-поле создания/редактирования замечания. alt+enter — подтвердить
 // (пустой ввод = отмена), обычный enter — перевод строки, escape — отмена.
 // ctrl+enter/ctrl+delete — полные no-op, чтобы не конфликтовать с переводом строки.
 // Дефект A (FR-O3): textarea фокусируется в момент открытия — символы печатаются немедленно.
-export function AnnotationEditor(props: { api: TuiPluginApi; store: AnnotationStore; onClose: () => void }) {
-  const theme = () => props.api.theme.current
+export function AnnotationEditor(props: { api: DiffAnnotationsApi; store: AnnotationStore; onClose: () => void }) {
+  const theme = () => props.api.theme
   const state = () => props.store.editor()
   const open = () => state().kind === "open"
   const title = createMemo(() => {
@@ -97,10 +97,10 @@ export function AnnotationEditor(props: { api: TuiPluginApi; store: AnnotationSt
         width="60%"
         height={9}
         border
-        backgroundColor={theme().backgroundPanel}
-        borderColor={theme().borderActive}
+        backgroundColor={theme().background.raised.high}
+        borderColor={theme().border.base}
       >
-        <text fg={theme().text} attributes={TextAttributes.BOLD}>
+        <text fg={theme().text.base} attributes={TextAttributes.BOLD}>
           {title()}
         </text>
         <textarea
@@ -110,11 +110,11 @@ export function AnnotationEditor(props: { api: TuiPluginApi; store: AnnotationSt
           }}
           initialValue={initial()}
           placeholder="Текст замечания…"
-          placeholderColor={theme().textMuted}
-          textColor={theme().text}
+          placeholderColor={theme().text.muted}
+          textColor={theme().text.base}
           height={5}
         />
-        <text fg={theme().textMuted}>alt+enter — подтвердить · esc — отмена</text>
+        <text fg={theme().text.muted}>alt+enter — подтвердить · esc — отмена</text>
       </box>
     </Show>
   )

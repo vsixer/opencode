@@ -1,40 +1,17 @@
 import { TextareaRenderable, TextAttributes, ScrollBoxRenderable } from "@opentui/core"
 import { useRenderer } from "@opentui/solid"
-import { Show, createEffect, createSignal, For, Index, onCleanup, onMount } from "solid-js"
-import { useTheme } from "../../context/theme"
-import { useSDK } from "../../context/sdk"
+import { Show, createEffect, createMemo, createSignal, For, Index, onCleanup, onMount } from "solid-js"
+import { useBindings } from "@opentui/keymap/solid"
+import type { Part as BtwPart } from "@opencode/schema/btw"
+import { useTheme, useThemes } from "../../context/theme"
+import { useClient } from "../../context/client"
 import { useBtw, type BtwRef } from "../../context/btw"
+import { useConfig } from "../../config"
+import { Keymap } from "../../context/keymap"
 import { Spinner } from "../../component/spinner"
 import { getScrollAcceleration } from "../../util/scroll"
 import { SplitBorder } from "../../ui/border"
-import { useBindings, useCommandShortcut } from "../../keymap"
-import { useTuiConfig } from "../../config"
-
-// Форма чанков стрима /btw (серверная схема BtwPart, см. session/btw/schema.ts).
-// Каждый кадр несёт btwID: панель отбрасывает кадры чужой беседы — изоляция
-// разговоров проверяется на клиенте, а не только на сервере.
-type BtwChunk =
-  | { type: "ready"; btwID: string; parentID: string }
-  | { type: "user"; btwID: string; id: string; text: string }
-  | { type: "text-delta"; btwID: string; messageID: string; delta: string }
-  | { type: "reasoning-delta"; btwID: string; messageID: string; delta: string }
-  | { type: "text-end"; btwID: string; messageID: string }
-  | {
-      type: "tool"
-      btwID: string
-      messageID: string
-      callID: string
-      tool: string
-      state: "running" | "completed" | "error"
-      title?: string
-      output?: string
-      error?: string
-    }
-  | { type: "assistant-end"; btwID: string; messageID: string; finish?: string }
-  | { type: "turn-end"; btwID: string }
-  | { type: "error"; btwID: string; message: string }
-  | { type: "warning"; btwID: string; message: string }
-  | { type: "closed"; btwID: string }
+import { generateThinkingSyntax } from "./thinking-syntax"
 
 type ToolEntry = {
   callID: string
@@ -49,17 +26,20 @@ type BtwMessage =
   | { role: "assistant"; id: string; text: string; reasoning: string; tools: ToolEntry[]; duration?: number }
 
 export function BtwPanel(props: { parentID: string; width: number }) {
-  const sdk = useSDK()
+  const client = useClient()
   const btw = useBtw()
-  const { theme, syntax, subtleSyntax } = useTheme()
+  const theme = useTheme()
+  const { currentSyntax: syntax } = useThemes()
+  const config = useConfig()
   const renderer = useRenderer()
-  const tuiConfig = useTuiConfig()
-  const closeShortcut = useCommandShortcut("session.btw.close")
+  const shortcuts = Keymap.useShortcuts()
+  const closeShortcut = () => shortcuts.get("session.btw.close")
+  const subtleSyntax = createMemo(() => generateThinkingSyntax(syntax(), theme.text.muted))
 
   const [textareaTarget, setTextareaTarget] = createSignal<TextareaRenderable>()
   let textarea: TextareaRenderable
   let scroll: ScrollBoxRenderable
-  const scrollAcceleration = getScrollAcceleration()
+  const scrollAcceleration = getScrollAcceleration(config.data)
   const [gen, setGen] = createSignal(1)
   const [messages, setMessages] = createSignal<BtwMessage[]>([])
   const [busy, setBusy] = createSignal(false)
@@ -88,10 +68,10 @@ export function BtwPanel(props: { parentID: string; width: number }) {
 
   onMount(async () => {
     try {
-      const res = await sdk.client.btw.open({ parentID: props.parentID }, { throwOnError: true })
-      const opened = res.data!.btwID
+      const res = await client.api.btw.open({ parentID: props.parentID })
+      const opened = res.btwID
       if (disposed) {
-        sdk.client.btw.close({ btwID: opened }).catch(() => {})
+        client.api.btw.close({ btwID: opened }).catch(() => {})
         return
       }
       setBtwID(opened)
@@ -106,7 +86,7 @@ export function BtwPanel(props: { parentID: string; width: number }) {
     turnAbort?.abort()
     btw.setRef(undefined)
     const id = btwID()
-    if (id) sdk.client.btw.close({ btwID: id }).catch(() => {})
+    if (id) client.api.btw.close({ btwID: id }).catch(() => {})
   })
 
   // Регистрируем ref поля ввода, чтобы команда cycle могла переключать фокус.
@@ -128,7 +108,7 @@ export function BtwPanel(props: { parentID: string; width: number }) {
   // Срабатывает только когда поле btw в фокусе (иначе cmd — no-op).
   // Двухканальный обрыв: локальный AbortController рвёт fetch немедленно,
   // серверный /btw/abort надёжен при half-open SSE.
-  const interruptBindings = tuiConfig.keybinds.get("session.interrupt")
+  const interruptBindings = config.data.keybinds.get("session.interrupt")
   useBindings(() => ({
     enabled: busy(),
     bindings: interruptBindings.map((b) => ({
@@ -148,7 +128,7 @@ export function BtwPanel(props: { parentID: string; width: number }) {
     turnAbort?.abort()
     if (id) {
       try {
-        await sdk.client.btw.abort({ btwID: id })
+        await client.api.btw.abort({ btwID: id })
       } catch {
         // не критично: локальный abort уже снял busy через EOF
       }
@@ -184,8 +164,8 @@ export function BtwPanel(props: { parentID: string; width: number }) {
   // macrotask-yield. Без yield плотный поток SSE-микрозадач (в одном
   // reader.read()) не отдаёт хода opentui — текст рисуется весь сразу в конце
   // тура. yield заставляет opentui перерисовать терминал между порциями. Без
-  // throttle O(n²) перерисовок markdown вешает TUI на тысячах дельт (diag run
-  // bb594ff8). pending переинициализируется на каждый тур в send().
+  // throttle O(n²) перерисовок markdown вешает TUI на тысячах дельт. pending
+  // переинициализируется на каждый тур в send().
   let pendingPatch: { text: string; reasoning: string; tools: ToolEntry[] } = { text: "", reasoning: "", tools: [] }
   const FLUSH_EVERY = 8
   function flushPending(assistantId: string) {
@@ -216,7 +196,7 @@ export function BtwPanel(props: { parentID: string; width: number }) {
     setExpandedThinking((prev) => (prev.has(id) ? prev : new Set(prev).add(id)))
   }
 
-  function handlePart(part: BtwChunk, assistantId: string) {
+  function handlePart(part: BtwPart, assistantId: string) {
     switch (part.type) {
       case "reasoning-delta":
         pendingPatch.reasoning += part.delta
@@ -279,11 +259,10 @@ export function BtwPanel(props: { parentID: string; width: number }) {
     // классификацией обрыва.
     let terminated = false
     try {
-      const resp = await sdk.client.btw.send({ btwID: id, text }, { signal: myAbort.signal, sseMaxRetryAttempts: 0 })
+      const stream = client.api.btw.send({ btwID: id, text }, { signal: myAbort.signal })
       let streamChunkCount = 0
-      for await (const raw of resp.stream) {
+      for await (const part of stream) {
         if (myAbort.signal.aborted || disposed) break
-        const part = raw as unknown as BtwChunk
         // Изоляция панелей: кадр чужой беседы (например, закрытой до нас)
         // игнорируется целиком — текст с другой панели не может попасть сюда.
         if ("btwID" in part && part.btwID !== id) continue
@@ -392,18 +371,20 @@ export function BtwPanel(props: { parentID: string; width: number }) {
       flexDirection="column"
       border={["left"]}
       customBorderChars={SplitBorder.customBorderChars}
-      borderColor={theme.border}
+      borderColor={theme.border.base}
     >
       <box flexDirection="column" flexGrow={1} minHeight={0} paddingLeft={1} paddingRight={1} gap={1}>
         <box flexDirection="row" justifyContent="space-between" alignItems="center" flexShrink={0}>
-          <text attributes={TextAttributes.BOLD} fg={theme.text}>
+          <text attributes={TextAttributes.BOLD} fg={theme.text.base}>
             btw — side chat
           </text>
           <box flexDirection="row" gap={1} flexShrink={0}>
             <Show when={busy()}>
-              <text fg={theme.primary}>⟳ {elapsed()}s</text>
+              <text fg={theme.text.action.primary.base}>⟳ {elapsed()}s</text>
             </Show>
-            <text fg={theme.textMuted}>{closeShortcut()} close</text>
+            <Show when={closeShortcut()}>
+              {(shortcut) => <text fg={theme.text.muted}>{shortcut()} close</text>}
+            </Show>
           </box>
         </box>
 
@@ -418,8 +399,8 @@ export function BtwPanel(props: { parentID: string; width: number }) {
           verticalScrollbarOptions={{
             paddingLeft: 1,
             trackOptions: {
-              backgroundColor: theme.backgroundElement,
-              foregroundColor: theme.border,
+              backgroundColor: theme.background.raised.base,
+              foregroundColor: theme.border.base,
             },
           }}
         >
@@ -428,7 +409,7 @@ export function BtwPanel(props: { parentID: string; width: number }) {
               <box flexDirection="column">
                 <Show when={msg().role === "assistant" && (msg() as { reasoning: string }).reasoning.length > 0}>
                   <text
-                    fg={theme.textMuted}
+                    fg={theme.text.muted}
                     onMouseUp={() => {
                       // Не переключаем, если пользователь выделял текст для копирования.
                       if (renderer.getSelection()?.getSelectedText()) return
@@ -447,22 +428,22 @@ export function BtwPanel(props: { parentID: string; width: number }) {
                       streaming={true}
                       syntaxStyle={subtleSyntax()}
                       content={(msg() as { reasoning: string }).reasoning}
-                      fg={theme.textMuted}
+                      fg={theme.text.muted}
                     />
                   </Show>
                 </Show>
                 <Show when={msg().role === "user"}>
                   <box
                     marginTop={1}
-                    backgroundColor={theme.backgroundElement}
+                    backgroundColor={theme.background.raised.base}
                     paddingLeft={1}
                     paddingRight={1}
                   >
-                    <text fg={theme.text}>you: {msg().text}</text>
+                    <text fg={theme.text.base}>you: {msg().text}</text>
                   </box>
                 </Show>
                 <Show when={msg().role === "assistant" && msg().text}>
-                  <text fg={theme.textMuted}>
+                  <text fg={theme.text.muted}>
                     btw{(msg() as { duration?: number }).duration !== undefined
                       ? ` · ${(msg() as { duration?: number }).duration}s`
                       : ""}
@@ -473,13 +454,13 @@ export function BtwPanel(props: { parentID: string; width: number }) {
                     internalBlockMode="top-level"
                     content={msg().text}
                     tableOptions={{ style: "grid" }}
-                    fg={theme.markdownText}
-                    bg={theme.background}
+                    fg={theme.markdown.text}
+                    bg={theme.background.base}
                   />
                 </Show>
                 <Show when={msg().role === "assistant" && (msg() as { tools: ToolEntry[] }).tools.length > 0}>
                   <text
-                    fg={theme.textMuted}
+                    fg={theme.text.muted}
                     onMouseUp={() => {
                       // Не переключаем при выделении текста для копирования.
                       if (renderer.getSelection()?.getSelectedText()) return
@@ -493,7 +474,7 @@ export function BtwPanel(props: { parentID: string; width: number }) {
                     <For each={(msg() as { tools: ToolEntry[] }).tools}>
                       {(t) => (
                         <box flexDirection="column">
-                          <text fg={theme.textMuted}>
+                          <text fg={theme.text.muted}>
                             {"  ["}
                             {t.state}
                             {"] "}
@@ -502,7 +483,7 @@ export function BtwPanel(props: { parentID: string; width: number }) {
                             {t.error ? ` (error: ${t.error})` : ""}
                           </text>
                           <Show when={t.output}>
-                            <text fg={theme.textMuted}>
+                            <text fg={theme.text.muted}>
                               {"  "}
                               {t.output!.slice(0, 2000)}
                               {t.output!.length > 2000 ? " …" : ""}
@@ -517,10 +498,10 @@ export function BtwPanel(props: { parentID: string; width: number }) {
             )}
           </Index>
           <Show when={error()}>
-            {(e) => <text fg={theme.error}>{e()}</text>}
+            {(e) => <text fg={theme.text.feedback.error.base}>{e()}</text>}
           </Show>
           <Show when={busy()}>
-            <Spinner color={theme.textMuted}>
+            <Spinner color={theme.text.muted}>
               thinking… {elapsed()}s
             </Spinner>
           </Show>
@@ -531,10 +512,10 @@ export function BtwPanel(props: { parentID: string; width: number }) {
             height={3}
             flexShrink={0}
             placeholder="Ask a side question… (enter to send)"
-            placeholderColor={theme.textMuted}
-            textColor={busy() ? theme.textMuted : theme.text}
-            focusedTextColor={busy() ? theme.textMuted : theme.text}
-            cursorColor={busy() ? theme.backgroundElement : theme.text}
+            placeholderColor={theme.text.muted}
+            textColor={busy() ? theme.text.muted : theme.text.base}
+            focusedTextColor={busy() ? theme.text.muted : theme.text.base}
+            cursorColor={busy() ? theme.background.raised.base : theme.text.base}
             onContentChange={() => {
               /* содержимое читается напрямую из textarea.plainText при submit */
             }}

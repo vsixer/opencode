@@ -1,8 +1,8 @@
 /** @jsxImportSource @opentui/solid */
 import { TextAttributes } from "@opentui/core"
 import { For, Show, createEffect, createMemo, createSignal } from "solid-js"
-import type { TuiPluginApi } from "@opencode-ai/plugin/tui"
-import { useBindings } from "../../../keymap"
+import type { DiffAnnotationsApi } from "./api"
+import { useBindings } from "@opentui/keymap/solid"
 import type { Annotation, AnnotationStore } from "./store"
 import { displayPathLabels, numberColumnWidth, pathBasename } from "./display-paths"
 
@@ -12,7 +12,7 @@ import { displayPathLabels, numberColumnWidth, pathBasename } from "./display-pa
 // первая запись. active=false гасит keymap-слой: пока панель не верхний оверлей (открыт
 // редактор/подтверждение), клавиши не перехватываются и не мешают нижележащей поверхности.
 export function AnnotationsPanel(props: {
-  api: TuiPluginApi
+  api: DiffAnnotationsApi
   store: AnnotationStore
   // Все файлы текущего диффа — коллизионный набор basename считается по ним,
   // не только по аннотированным.
@@ -23,7 +23,7 @@ export function AnnotationsPanel(props: {
   onJump: (annotation: Annotation) => void
   onClose: () => void
 }) {
-  const theme = () => props.api.theme.current
+  const theme = () => props.api.theme
 
   // Плоский список записей в «географическом» порядке (файл → строка).
   const flat = createMemo(() =>
@@ -130,12 +130,12 @@ export function AnnotationsPanel(props: {
       bottom={1}
       width="40%"
       border
-      backgroundColor={theme().backgroundPanel}
-      borderColor={theme().borderActive}
+      backgroundColor={theme().background.raised.high}
+      borderColor={theme().border.base}
       flexDirection="column"
     >
       <box flexDirection="row" gap={1}>
-        <text fg={theme().text} attributes={TextAttributes.BOLD} wrapMode="none">
+        <text fg={theme().text.base} attributes={TextAttributes.BOLD} wrapMode="none">
           Замечания ({flat().length})
         </text>
       </box>
@@ -144,7 +144,7 @@ export function AnnotationsPanel(props: {
             перекрывает заголовок (интерлив символов); строку обязательно держим
             в собственном row-box. wrapMode="none" — усечение вместо переноса. */}
         <box flexDirection="row">
-          <text fg={theme().textMuted} wrapMode="none">
+          <text fg={theme().text.muted} wrapMode="none">
             Пусто — нажмите Enter на строке патча.
           </text>
         </box>
@@ -153,7 +153,7 @@ export function AnnotationsPanel(props: {
         <For each={groups()}>
           {(group) => (
             <box flexDirection="column" gap={0}>
-              <text fg={theme().secondary} attributes={TextAttributes.BOLD} wrapMode="none">
+              <text fg={theme().text.base} attributes={TextAttributes.BOLD} wrapMode="none">
                 {labelFor(group[0])}
               </text>
               <For each={group[1]}>
@@ -161,12 +161,12 @@ export function AnnotationsPanel(props: {
                   const index = () => flat().findIndex((a) => a.id === ann.id)
                   const isSelected = () => index() === selected() && index() !== -1
                   return (
-                    <box flexDirection="row" gap={1} backgroundColor={isSelected() ? theme().backgroundMenu : undefined}>
-                      <text fg={ann.state === "unbound" ? theme().warning : theme().accent} width={1}>
+                    <box flexDirection="row" gap={1} backgroundColor={isSelected() ? theme().background.raised.high : undefined}>
+                      <text fg={ann.state === "unbound" ? theme().text.feedback.warning.base : theme().text.action.primary.base} width={1}>
                         {ann.state === "unbound" ? "?" : "●"}
                       </text>
                       <text
-                        fg={theme().textMuted}
+                        fg={theme().text.muted}
                         width={numberWidth()}
                         justifyContent="flex-end"
                         wrapMode="none"
@@ -174,7 +174,7 @@ export function AnnotationsPanel(props: {
                       >
                         {ann.state === "unbound" ? "—" : ann.anchor.line}
                       </text>
-                      <text fg={theme().text} wrapMode="none" flexGrow={1}>
+                      <text fg={theme().text.base} wrapMode="none" flexGrow={1}>
                         {ann.text.split("\n")[0]}
                       </text>
                     </box>
@@ -186,7 +186,7 @@ export function AnnotationsPanel(props: {
         </For>
       </scrollbox>
       <box flexDirection="row" flexShrink={0}>
-        <text fg={theme().textMuted} wrapMode="none">
+        <text fg={theme().text.muted} wrapMode="none">
           j/k · enter — к строке · e — правка · d — удалить · a — закрыть
         </text>
       </box>

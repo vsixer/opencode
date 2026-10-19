@@ -1,0 +1,70 @@
+import { RGBA } from "@opentui/core"
+import { ansiToRgba, tint } from "./color"
+import type { ColorValue, Theme, ThemeColor, ThemeV1Json } from "./v1"
+
+export function resolveThemeColors(
+  theme: ThemeV1Json,
+  mode: "dark" | "light",
+  resolveAnsi: (code: number) => RGBA = ansiToRgba,
+) {
+  const defs = theme.defs ?? {}
+  function resolveColor(color: ColorValue, chain: string[] = []): RGBA {
+    if (color instanceof RGBA) return color
+    if (typeof color === "string") {
+      if (color === "transparent" || color === "none") return RGBA.fromInts(0, 0, 0, 0)
+
+      if (color.startsWith("#")) return RGBA.fromHex(color)
+
+      if (chain.includes(color)) {
+        throw new Error(`Circular color reference: ${[...chain, color].join(" -> ")}`)
+      }
+
+      const next = defs[color] ?? theme.theme[color as ThemeColor]
+      if (next === undefined) {
+        throw new Error(`Color reference "${color}" not found in defs or theme`)
+      }
+      return resolveColor(next, [...chain, color])
+    }
+    if (typeof color === "number") return resolveAnsi(color)
+    return resolveColor(color[mode], chain)
+  }
+
+  const resolved = Object.fromEntries(
+    Object.entries(theme.theme)
+      .filter(
+        ([key]) =>
+          key !== "selectedListItemText" &&
+          key !== "backgroundMenu" &&
+          key !== "thinkingOpacity" &&
+          key !== "diffCursorLineBg" &&
+          key !== "diffAnnotationMarkBg",
+      )
+      .map(([key, value]) => [key, resolveColor(value as ColorValue)]),
+  ) as Partial<Record<ThemeColor, RGBA>>
+
+  const hasSelectedListItemText = theme.theme.selectedListItemText !== undefined
+  return {
+    theme: {
+      ...(resolved as Record<ThemeColor, RGBA>),
+      selectedListItemText: hasSelectedListItemText
+        ? resolveColor(theme.theme.selectedListItemText!)
+        : resolved.background!,
+      backgroundMenu:
+        theme.theme.backgroundMenu === undefined
+          ? resolved.backgroundElement!
+          : resolveColor(theme.theme.backgroundMenu),
+      // Декорации diff-viewer: подсветка строки курсора — фон элементов,
+      // пометка аннотации — тинт фона акцентом (доля 0.25).
+      diffCursorLineBg:
+        theme.theme.diffCursorLineBg === undefined
+          ? resolved.backgroundElement!
+          : resolveColor(theme.theme.diffCursorLineBg),
+      diffAnnotationMarkBg:
+        theme.theme.diffAnnotationMarkBg === undefined
+          ? tint(resolved.background!, resolved.accent!, 0.25)
+          : resolveColor(theme.theme.diffAnnotationMarkBg),
+    } satisfies Omit<Theme, "_hasSelectedListItemText" | "thinkingOpacity">,
+    hasSelectedListItemText,
+    thinkingOpacity: theme.theme.thinkingOpacity ?? 0.6,
+  }
+}

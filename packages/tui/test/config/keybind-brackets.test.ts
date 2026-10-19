@@ -1,37 +1,37 @@
 import { describe, expect, test } from "bun:test"
-import { Definitions, Keybinds, TuiKeybind } from "../../src/config/keybind"
+import { Definitions, TuiKeybind, type TuiKeybind as TuiKeybindTypes } from "../../src/config/keybind"
 
-// Дефолты [ / ]: next — «[», previous — «]»; пользовательский конфиг со старой
-// раскладкой и с новой парсится одинаково, конфликт остаётся на совести слоя
-// keymap (значения — валидные BindingValue).
+// Дефолты [ / ]: next — «]», previous — «[»; пользовательский конфиг с любой
+// раскладкой парсится одинаково, конфликт остаётся на совести слоя keymap
+// (значения — валидные BindingValue).
 describe("bracket hunk bindings", () => {
-  test("defaults are swapped", () => {
-    expect(TuiKeybind.defaultValue("diff_next_hunk")).toBe("[")
-    expect(TuiKeybind.defaultValue("diff_previous_hunk")).toBe("]")
+  test("defaults are next ] / previous [", () => {
+    expect(TuiKeybind.defaultValue("diff.next_hunk")).toBe("]")
+    expect(TuiKeybind.defaultValue("diff.previous_hunk")).toBe("[")
   })
 
-  test("legacy and swapped user configs parse without throwing", () => {
-    const legacy = Keybinds.parse({
-      diff_next_hunk: "]",
-      diff_previous_hunk: "[",
-    })
-    const swapped = Keybinds.parse({
-      diff_next_hunk: "[",
-      diff_previous_hunk: "]",
-    })
-    expect(legacy.diff_next_hunk).toBe("]")
-    expect(swapped.diff_next_hunk).toBe("[")
+  test("swapped and legacy user configs parse without throwing", () => {
+    const legacy = TuiKeybind.parse({
+      "diff.next_hunk": "[",
+      "diff.previous_hunk": "]",
+    } satisfies TuiKeybindTypes.KeybindOverrides)
+    const swapped = TuiKeybind.parse({
+      "diff.next_hunk": "]",
+      "diff.previous_hunk": "[",
+    } satisfies TuiKeybindTypes.KeybindOverrides)
+    expect(legacy["diff.next_hunk"]).toBe("[")
+    expect(swapped["diff.next_hunk"]).toBe("]")
   })
 
   test("unknown keys are rejected", () => {
     expect(() =>
       // @ts-expect-error намеренно неизвестный ключ
-      Keybinds.parse({ diff_next_hunk_typo: "[" }),
+      TuiKeybind.parse({ "diff.next_hunk_typo": "[" }),
     ).toThrow()
   })
 
-  test("descriptions survive the swap", () => {
-    expect(Definitions.diff_next_hunk.description).toBe("Jump to next diff hunk")
-    expect(Definitions.diff_previous_hunk.description).toBe("Jump to previous diff hunk")
+  test("descriptions survive remapping", () => {
+    expect(Definitions["diff.next_hunk"].description).toBe("Jump to next diff hunk")
+    expect(Definitions["diff.previous_hunk"].description).toBe("Jump to previous diff hunk")
   })
 })

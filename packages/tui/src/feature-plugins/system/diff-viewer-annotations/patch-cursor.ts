@@ -1,4 +1,4 @@
-import { parsePatchFileLines, type DiffFile, type PatchFileLine, type PatchSide } from "./patch-lines"
+import { parsePatchFileLines, type DiffFile, type PatchFileLine } from "./patch-lines"
 
 // Плоская модель навигации: видимые строки патчей всех файлов одним списком.
 // Порядок совпадает с порядком рендера (строка патча = строка терминала при 1:1,

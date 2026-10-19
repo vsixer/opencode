@@ -1,14 +1,14 @@
 /** @jsxImportSource @opentui/solid */
 import { TextAttributes } from "@opentui/core"
 import { createSignal } from "solid-js"
-import type { TuiPluginApi } from "@opencode-ai/plugin/tui"
-import { useBindings } from "../../../keymap"
+import type { DiffAnnotationsApi } from "./api"
+import { useBindings } from "@opentui/keymap/solid"
 
 // Генерик-диалог подтверждения: заголовок + подтверждающая/отменяющая опции.
 // Начальный фокус детерминирован на подтверждающей опции (FR-O1): pressEnter
 // подтверждает, pressEscape отклоняет, pressTab переключает выбор (AC-08/AC-30).
 export function ConfirmDialog(props: {
-  api: TuiPluginApi
+  api: DiffAnnotationsApi
   title: string
   message?: string
   confirmLabel?: string
@@ -16,7 +16,7 @@ export function ConfirmDialog(props: {
   onConfirm: () => void
   onCancel: () => void
 }) {
-  const theme = () => props.api.theme.current
+  const theme = () => props.api.theme
   // Детерминированный начальный фокус — подтверждающая опция (FR-O1).
   const [selectedConfirm, setSelectedConfirm] = createSignal(true)
 
@@ -48,23 +48,23 @@ export function ConfirmDialog(props: {
       width="50%"
       height={8}
       border
-      backgroundColor={theme().backgroundPanel}
-      borderColor={theme().borderActive}
+      backgroundColor={theme().background.raised.high}
+      borderColor={theme().border.base}
       flexDirection="column"
       gap={1}
     >
-      <text fg={props.danger ? theme().error : theme().text} attributes={TextAttributes.BOLD}>
+      <text fg={props.danger ? theme().text.feedback.error.base : theme().text.base} attributes={TextAttributes.BOLD}>
         {props.title}
       </text>
-      {props.message ? <text fg={theme().textMuted}>{props.message}</text> : null}
+      {props.message ? <text fg={theme().text.muted}>{props.message}</text> : null}
       <box flexDirection="row" gap={2}>
-        <text fg={selectedConfirm() ? (props.danger ? theme().error : theme().accent) : theme().textMuted}>
+        <text fg={selectedConfirm() ? (props.danger ? theme().text.feedback.error.base : theme().text.action.primary.base) : theme().text.muted}>
           {selectedConfirm() ? "› " : "  "}
           {props.confirmLabel ?? "Подтвердить"}
         </text>
-        <text fg={selectedConfirm() ? theme().textMuted : theme().text}>{"Отмена"}</text>
+        <text fg={selectedConfirm() ? theme().text.muted : theme().text.base}>{"Отмена"}</text>
       </box>
-      <text fg={theme().textMuted}>enter — выбрать · tab — переключить · esc — отмена</text>
+      <text fg={theme().text.muted}>enter — выбрать · tab — переключить · esc — отмена</text>
     </box>
   )
 }

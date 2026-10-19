@@ -150,7 +150,7 @@ function overlaysEqual(left: readonly LineDecoration[], right: readonly LineDeco
 // pristine переснимается с нуля и итог применяется заново. Повторное применение
 // того же состояния без внешних изменений — no-op (защита от лишних setLineColors).
 export type SideMerger = {
-  apply: (overlays: readonly LineDecoration[]) => void
+  apply: (overlays: readonly LineDecoration[]) => boolean
 }
 
 export function createSideMerger(side: SideLike): SideMerger {
@@ -162,11 +162,12 @@ export function createSideMerger(side: SideLike): SideMerger {
       const current = side.getLineColors()
       const externalRebuild = !lastApplied || !deepEqualLineColors(current, lastApplied)
       if (externalRebuild) pristine = cloneLineColors(current)
-      if (!externalRebuild && lastOverlays && overlaysEqual(lastOverlays, overlays)) return
+      if (!externalRebuild && lastOverlays && overlaysEqual(lastOverlays, overlays)) return false
       side.setLineColors(mergeLineColors(pristine, overlays))
       // lastApplied читается из рендера, а не из входных данных (митигация U3).
       lastApplied = cloneLineColors(side.getLineColors())
       lastOverlays = overlays
+      return true
     },
   }
 }

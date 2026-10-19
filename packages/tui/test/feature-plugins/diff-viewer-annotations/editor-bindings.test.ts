@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { createTestKeymap } from "@opentui/keymap/testing"
-import { helpKeyColumnWidth } from "../../../src/feature-plugins/system/diff-viewer-ui"
+import { helpKeyColumnWidth } from "../../../src/feature-plugins/system/diff-viewer"
 
 // UT-01 (D1, R1): биндинг alt+return матчит мета-модифицированный enter, которым
 // kitty-протокол доставляет alt+enter.
@@ -33,9 +33,12 @@ describe("editor confirm binding — alt+return matches meta+enter (UT-01)", () 
 
 // UT-13 (Q2, FR-5.1): динамическая ширина Key-колонки модалки справки.
 describe("help dialog — key column width (UT-13)", () => {
-  test("wide enough for alt+enter with separator, floor of 6", () => {
-    expect(helpKeyColumnWidth(["q", "alt+enter", "0-9", "<leader>d"])).toBe(10)
-    expect(helpKeyColumnWidth(["q", "n", "p"])).toBe(6)
-    expect(helpKeyColumnWidth([])).toBe(6)
+  test("base grid is the upstream 17; longer bindings widen the column", () => {
+    expect(helpKeyColumnWidth(["q", "alt+enter", "0-9", "<leader>d"])).toBe(17)
+    expect(helpKeyColumnWidth(["q", "n", "p"])).toBe(17)
+    expect(helpKeyColumnWidth(["shift+j / shift+k"])).toBe(17)
+    expect(helpKeyColumnWidth(["ctrl+shift+pageup"])).toBe(17)
+    expect(helpKeyColumnWidth(["ctrl+shift+pageup-long"])).toBe(22)
+    expect(helpKeyColumnWidth([])).toBe(17)
   })
 })

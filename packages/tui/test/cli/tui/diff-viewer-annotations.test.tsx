@@ -1,29 +1,43 @@
 /** @jsxImportSource @opentui/solid */
-// Harness-сценарии аннотирования (test.md §2): полный testRender реального diff-viewer,
-// драйв командами слоёв и mockInput (pressEnter/pressEscape/pressTab-управляемость FR-R3).
-// FR-2: все футер-ассерты идут через footerCell (первая ячейка нижней строки кадра),
-// не подстрокой по всему кадру; счётчик «замечаний: N» из футера удалён.
+// Харнес-сценарии аннотирования: полный testRender реального diff-viewer,
+// драйв командами слоёв и mockInput (pressEnter/pressEscape/pressTab-управляемость).
+// Статус-ассерты идут через footerCell (нижние ряды кадра), не подстрокой по всему кадру.
 import { afterEach, expect, test } from "bun:test"
 import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import path from "node:path"
-import { onCleanup, createSignal } from "solid-js"
-import { createDefaultOpenTuiKeymap } from "@opentui/keymap/opentui"
+import { createSignal, Show } from "solid-js"
 import { DiffRenderable, TextareaRenderable, type Renderable } from "@opentui/core"
-import { testRender, useRenderer } from "@opentui/solid"
-import type { TuiPluginApi, TuiPluginMeta, TuiRouteCurrent, TuiRouteDefinition } from "@opencode-ai/plugin/tui"
-import type { Session } from "@opencode-ai/sdk/v2"
-import { KVProvider } from "../../../src/context/kv"
-import { ThemeProvider } from "../../../src/context/theme"
-import { DEFAULT_THEMES, resolveTheme } from "../../../src/theme"
-import { TuiConfigProvider } from "../../../src/config"
-import { OpencodeKeymapProvider, registerOpencodeKeymap } from "../../../src/keymap"
+import { testRender } from "@opentui/solid"
+import { useKeymap } from "@opentui/keymap/solid"
+import type {
+  Context,
+  Destination,
+  KeymapCommand,
+  KeymapLayer,
+  Page,
+  Route,
+  SlotClaim,
+} from "@opencode/plugin/tui/context"
+import { ThemeProvider, useThemes } from "../../../src/context/theme"
+import { ConfigProvider } from "../../../src/config"
+import { Keymap } from "../../../src/context/keymap"
+import { StorageProvider } from "../../../src/context/storage"
+import { TuiAppProvider } from "../../../src/context/runtime"
+import { DialogProvider, useDialog } from "../../../src/ui/dialog"
+import { ToastProvider } from "../../../src/ui/toast"
+import { createDialogApi } from "../../../src/plugin/api"
 import diffViewerPlugin from "../../../src/feature-plugins/system/diff-viewer"
-import { draftExists, getOrCreateDraft, resetDrafts, SESSIONLESS_OWNER } from "../../../src/feature-plugins/system/diff-viewer-annotations/drafts"
-import { createTuiPluginApi } from "../../fixture/tui-plugin"
+import {
+  draftExists,
+  getOrCreateDraft,
+  resetDrafts,
+  SESSIONLESS_OWNER,
+} from "../../../src/feature-plugins/system/diff-viewer-annotations/drafts"
 import { createTuiResolvedConfig } from "../../fixture/tui-runtime"
 import { TestTuiContexts } from "../../fixture/tui-environment"
-
-const startRoute: TuiRouteCurrent = { name: "session", params: { sessionID: "session-1" } }
+import { createApi, createEventStream, createFetch, json } from "../../fixture/tui-client"
+import { emptyThemeSource } from "../../fixture/fixture"
+const startRoute: Route = { type: "session", sessionID: "session-1" }
 
 const PATCH = `--- a/src/file.ts
 +++ b/src/file.ts
@@ -57,55 +71,31 @@ const DELETED_PATCH = `--- a/gone.ts
 -only line`
 
 // Дальний контекст (c7–c9) скрыт компактом; c1 — вне окон обоих изменений.
-const LONG_PATCH = `--- a/big.ts
-+++ b/big.ts
-@@ -1,12 +1,12 @@
- c1
- c2
- c3
--old4
-+new4
- c5
- c6
- c7
- c8
- c9
- c10
- c11
--old12
-+new12`
-
 const session = {
   id: "session-1",
-  slug: "session-1",
   projectID: "project-1",
-  directory: "/repo/session",
+  location: { directory: "/repo/session" },
   title: "Session",
-  version: "1",
-  time: { created: 0, updated: 0 },
-} satisfies Session
-
-const pluginMeta = {
-  id: "diff-viewer",
-  source: "internal",
-  spec: "diff-viewer",
-  target: "diff-viewer",
-  first_time: 0,
-  last_time: 0,
-  time_changed: 0,
-  load_count: 1,
-  fingerprint: "test",
-  state: "same",
-} satisfies TuiPluginMeta
+  cost: { currency: "USD", amount: 0 },
+  tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+  time: {
+    created: 0,
+    updated: 0,
+  },
+}
 
 type ToastCall = { title?: string; message: string; variant?: string }
+
+// Живая тема резолвится внутри дерева ThemeProvider; декорациям нужны различимые
+// cursor/mark цвета — читаем токены из того же резолва, что рисует viewer.
+let liveTheme: ReturnType<ReturnType<typeof useThemes>["currentTokens"]> | undefined
 type MessageState = Array<{ id: string; role: string; text: string; type: string; time: { created: number } }> | undefined
 
 type HarnessHandle = {
   app: Awaited<ReturnType<typeof testRender>>
-  commands: Map<string, { run?: (input: never) => void }>
-  current: () => TuiRouteCurrent | { name: string }
-  promptCalls: () => Array<{ request: { parts: Array<{ type: string; text: string }> } }>
+  commands: Map<string, KeymapCommand>
+  current: () => Route
+  promptCalls: () => Array<{ request: { sessionID: string; text: string } }>
   setPrompt: (impl: () => Promise<unknown>) => void
   setMessages: (messages: MessageState) => void
   toasts: () => readonly ToastCall[]
@@ -113,121 +103,183 @@ type HarnessHandle = {
 
 async function renderAnnotationsViewer(
   vcsDiff: unknown[],
-  options: { height?: number; width?: number; initialRoute?: TuiRouteCurrent; withDeletedFile?: boolean } = {},
+  options: { height?: number; width?: number; initialRoute?: Route; withDeletedFile?: boolean } = {},
 ): Promise<HarnessHandle> {
-  const commands = new Map<
-    string,
-    NonNullable<Parameters<TuiPluginApi["keymap"]["registerLayer"]>[0]["commands"]>[number]
-  >()
-  let current = options.initialRoute ?? startRoute
-  let renderDiff: TuiRouteDefinition["render"] | undefined
-  const promptCalls: Array<{ request: { parts: Array<{ type: string; text: string }> } }> = []
+  const commands = new Map<string, KeymapCommand>()
+  const [current, setCurrent] = createSignal<Route>(options.initialRoute ?? startRoute)
+  const promptCalls: Array<{ request: { sessionID: string; text: string } }> = []
   let promptImpl: () => Promise<unknown> = async () => ({})
   let messagesState: MessageState = []
   const toastCalls: ToastCall[] = []
-  // Харнес-реализация диалогового слоя: replace рендерит переданный узел поверх
-  // viewer (фикстурный ui.dialog — заглушка), clear убирает.
-  const [dialogRender, setDialogRender] = createSignal<() => unknown>()
   const config = createTuiResolvedConfig()
-  const diff = options.withDeletedFile ? [...vcsDiff, { file: "gone.ts", patch: DELETED_PATCH, additions: 0, deletions: 1, status: "deleted" }] : vcsDiff
+  let renderDiff: Page["render"] | undefined
+  let renderCommands: SlotClaim<"app">["render"] | undefined
+  const diff = options.withDeletedFile
+    ? [...vcsDiff, { file: "gone.ts", patch: DELETED_PATCH, additions: 0, deletions: 1, status: "deleted" }]
+    : vcsDiff
+
+  const transport = createFetch(async (url, request) => {
+    if (url.pathname === "/api/session/session-1/prompt") {
+      const body = (await request.json()) as { sessionID?: string; text?: string }
+      promptCalls.push({ request: { sessionID: body.sessionID ?? "session-1", text: body.text ?? "" } })
+      const value = await promptImpl()
+      return value instanceof Response ? value : json({ data: value ?? {} })
+    }
+    if (url.pathname === "/api/session/session-1/diff") return json({ data: [] })
+    if (url.pathname === "/api/vcs/base")
+      return json({
+        location: { directory: "/repo/session" },
+        data: { name: "v2", ref: "refs/heads/v2", source: "default" },
+      })
+    if (url.pathname === "/api/vcs/branch")
+      return json({ location: { directory: "/repo/session" }, data: ["v2", "release"] })
+    if (url.pathname !== "/api/vcs/diff") return
+    return json({
+      location: { directory: "/repo/session", project: { id: "project-1", directory: "/repo/session" } },
+      data: diff,
+    })
+  }, createEventStream())
 
   function Harness() {
-    const renderer = useRenderer()
-    const keymap = createDefaultOpenTuiKeymap(renderer)
-    const offKeymap = registerOpencodeKeymap(keymap, renderer, config)
-    onCleanup(offKeymap)
-    const registerLayer = keymap.registerLayer.bind(keymap)
-    keymap.registerLayer = (layer) => {
-      layer.commands?.forEach((command) => commands.set(command.name, command))
-      return registerLayer(layer)
-    }
-    const base = createTuiPluginApi({
-      keymap,
-      client: {
-        vcs: {
-          diff: async () => ({ data: diff }),
+    function Content() {
+      const dialog = useDialog()
+      const keymap = Keymap.use()
+      const shortcuts = Keymap.useShortcuts()
+      liveTheme = useThemes().currentTokens()
+      // Перехват raw-слоёв (goto, оверлеи движка): useBindings внутри компонентов
+      // регистрирует команды на keymap провайдера — патчим registerLayer этого инстанса.
+      const rawKeymap = useKeymap()
+      const registerLayer = rawKeymap.registerLayer.bind(rawKeymap)
+      // Перехват raw-слоёв: команды движка (goto, оверлеи) регистрируются через
+      // useBindings напрямую, минуя context.keymap. В карту попадает только то,
+      // чего ещё нет: raw-команды viewer (без context-обёртки) приоритетнее —
+      // тест дёргает run() без аргументов.
+      rawKeymap.registerLayer = ((layer: { commands?: Array<{ name?: string }> }) => {
+        layer.commands?.forEach((command) => {
+          if (command.name && !commands.has(command.name)) commands.set(command.name, command as KeymapCommand)
+        })
+        return registerLayer(layer as never)
+      }) as typeof rawKeymap.registerLayer
+
+      const context = {
+        options: {},
+        storage: {
+          memory: <T,>(_key: string, options: { initial: T }) => [
+            options.initial,
+            (_update: (draft: T) => void) => {},
+          ],
         },
-        session: {
-          diff: async () => ({ data: [] }),
-          prompt: async (request: never) => {
-            promptCalls.push({ request })
-            return promptImpl()
+        client: createApi(transport.fetch),
+        data: {
+          session: {
+            get: () => ({ ...session }),
+            status: () => "idle",
+            message: { list: () => messagesState },
+          },
+          location: {
+            default: () => ({ directory: "/repo/session" }),
+            vcs: { info: () => ({ branch: { current: "feature" } }) },
           },
         },
-      } as unknown as TuiPluginApi["client"],
-      state: {
-        session: {
-          get: () => session,
-          messages: (() => messagesState) as unknown as TuiPluginApi["state"]["session"]["messages"],
+        get theme() {
+          return liveTheme
         },
-      },
-      theme: { current: resolvedTheme } as unknown as TuiPluginApi["theme"],
-    })
-    const api = {
-      ...base,
-      ui: {
-        ...base.ui,
-        toast: (input: ToastCall) => {
-          toastCalls.push(input)
+        keymap: {
+          layer(input: () => KeymapLayer) {
+            input().commands?.forEach((command) => {
+              if (command.id) commands.set(command.id, command)
+            })
+            Keymap.createLayer(input)
+          },
+          dispatch: keymap.dispatch,
+          shortcuts: shortcuts.list,
+          mode: keymap.mode,
         },
-        dialog: {
-          ...base.ui.dialog,
-          clear: () => setDialogRender(undefined),
-          replace: (render: () => unknown) => setDialogRender(() => render),
+        ui: {
+          dialog: createDialogApi(dialog, (render) => render()),
+          toast: {
+            show: (input: ToastCall) => {
+              toastCalls.push(input)
+            },
+          },
+          panel: { open: () => false, close: () => {}, current: () => undefined },
+          router: {
+            register(page: Page) {
+              if (page.name === "diff") renderDiff = page.render
+              return () => {}
+            },
+            navigate(destination: Destination) {
+              setCurrent(
+                destination.type === "plugin" && !("id" in destination)
+                  ? { ...destination, id: "opencode.diffs" }
+                  : destination,
+              )
+            },
+            current,
+          },
+          slot(claim: SlotClaim<"app">) {
+            renderCommands = claim.render
+            return () => {}
+          },
         },
-      },
-      route: {
-        register(routes) {
-          renderDiff = routes.find((route) => route.name === "diff")?.render
-          return () => {}
-        },
-        navigate(name, params) {
-          current = params ? { name, params } : { name }
-        },
-        get current() {
-          return current
-        },
-      },
-    } satisfies TuiPluginApi
+      } as unknown as Context
 
-    void diffViewerPlugin.tui(api, undefined, pluginMeta)
-    if (!options.initialRoute) commands.get("diff.open")?.run?.({} as never)
+      void diffViewerPlugin.setup(context)
+      const commandView = renderCommands?.({})
+      return (
+        <>
+          {commandView}
+          <Show when={current().type === "plugin" ? current() : undefined} keyed>
+            {(route) => renderDiff?.({ data: route.type === "plugin" ? route.data : undefined })}
+          </Show>
+        </>
+      )
+    }
 
     return (
       <TestTuiContexts>
-        <OpencodeKeymapProvider keymap={keymap}>
-          <TuiConfigProvider config={config}>
-            <KVProvider>
-              <ThemeProvider mode="dark">
-                {renderDiff?.({ params: "params" in current ? current.params : undefined })}
-                {dialogRender()?.() as never}
-              </ThemeProvider>
-            </KVProvider>
-          </TuiConfigProvider>
-        </OpencodeKeymapProvider>
+        <TuiAppProvider value={{ name: "test", version: "test", channel: "test" }}>
+          <StorageProvider>
+            <ConfigProvider config={config}>
+              <Keymap.Provider>
+                <ToastProvider>
+                  <ThemeProvider mode="dark" source={emptyThemeSource}>
+                    <DialogProvider>
+                      <Content />
+                    </DialogProvider>
+                  </ThemeProvider>
+                </ToastProvider>
+              </Keymap.Provider>
+            </ConfigProvider>
+          </StorageProvider>
+        </TuiAppProvider>
       </TestTuiContexts>
     )
   }
 
   // kittyKeyboard: ctrl+return кодируется однозначно (в legacy-режиме неотличим от
   // ctrl+j) — как в test/cli/tui/dialog-prompt.test.tsx.
+  // Ширина по умолчанию — полный макет viewer: в компакт-режиме апстрим
+  // зарезервировал футер подсказок, и плавающий индикатор строки курсора
+  // не рендерится.
   const app = await testRender(() => <Harness />, {
-    width: options.width ?? 80,
+    width: options.width ?? 160,
     height: options.height ?? 24,
     kittyKeyboard: true,
   })
-  for (let attempt = 0; attempt < 10 && !commands.has("diff.close"); attempt++) {
-    await app.renderOnce()
-    if (commands.has("diff.close")) break
-    await new Promise((resolve) => setTimeout(resolve, 25))
-  }
+  await app.waitFor(() => commands.has("diff.open"))
+  if (!options.initialRoute) commands.get("diff.open")!.run()
+  await app.waitFor(() => commands.has("diff.close"))
+  await app.flush()
   if (vcsDiff.length > 0)
-    await app.waitForFrame((frame) => frame.includes("const first") || frame.includes("one") || frame.includes("new4"))
+    await app.waitForFrame(
+      (frame) => frame.includes("const first") || frame.includes("one") || frame.includes("new4"),
+    )
   await app.flush()
   return {
     app,
     commands,
-    current: () => current,
+    current,
     promptCalls: () => promptCalls,
     setPrompt: (impl) => {
       promptImpl = impl
@@ -274,13 +326,11 @@ function closeColors(actual: unknown, expected: unknown): boolean {
   const right = channels(expected)
   return left.every((channel, index) => Math.abs(channel - right[index]) <= 1)
 }
-
-// Фактическая тема теста: фикстура plugin api по умолчанию отдаёт один цвет на все
-// ключи — декорациям нужны различимые cursor/mark значения, поэтому тема api
-// проксируется на резолвнутую opencode-тему (ту же самую рисует ThemeProvider).
-const resolvedTheme = resolveTheme(DEFAULT_THEMES.opencode, "dark")
-const cursorBg = () => resolvedTheme.diffCursorLineBg
-const markBg = () => resolvedTheme.diffAnnotationMarkBg
+// Фактическая тема теста: читается из живого резолва ThemeProvider в HARNESS
+// (см. liveTheme) — декорациям нужны различимые cursor/mark значения, и ассерты
+// сравнивают с тем же резолвом, который рисует viewer.
+const cursorBg = () => liveTheme!.diffCursorLineBg
+const markBg = () => liveTheme!.diffAnnotationMarkBg
 
 // Записи стороны с данным цветом gutter-карты (курсор/пометка задают gutter явно).
 function entriesWithColor(side: SideHandle, color: unknown): number[] {
@@ -500,7 +550,7 @@ test("closing with an empty draft closes immediately; with a draft it shows the 
 
     await run(viewer2, "diff.close")
     // диалог открыт — навигации не было, маршрут по-прежнему diff
-    expect((viewer2.current() as { name: string }).name).toBe("diff")
+    expect(viewer2.current().type).toBe("plugin")
     await viewer2.app.waitForFrame((frame) => frame.includes("Сохранить"))
     expect(viewer2.commands.has("diff.annotate.exit.choose")).toBe(true)
     expect(viewer2.commands.has("diff.annotate.exit.cancel")).toBe(true)
@@ -757,69 +807,6 @@ test("J/K quarter-scroll in cursor mode clamps at both edges (TC-710/TC-712, AC-
   }
 })
 
-test("N/J/K/e cancel goto-file input; p no longer bound anywhere (TC-716, AC-5)", async () => {
-  // Широкий кадр: ячейка «goto file: N» не переносится (паттерн TC-61x).
-  const viewer = await renderAnnotationsViewer(withThreeFiles(), { width: 200 })
-  try {
-    await focusFileTree(viewer)
-    await typeIntoFocused(viewer, "3")
-    await until(() => gotoFileInFrame(viewer.app, "3"))
-    // e отменяет ввод и поглощается: ни spawn, ни toast (реальный ввод, паттерн TC-614).
-    await typeIntoFocused(viewer, "e")
-    await until(() => gotoFileAbsent(viewer.app))
-    expect(viewer.toasts()).toHaveLength(0)
-    // Повторный старт и отмена: буфер снова гаснет без side-эффектов.
-    await run(viewer, "diff.gotofile.digit.2")
-    await until(() => gotoFileInFrame(viewer.app, "2"))
-    await viewer.app.mockInput.pressEscape()
-    await until(() => gotoFileAbsent(viewer.app))
-    // p больше не в cancel-листе и не является командной клавишей предыдущего файла.
-    const [keybinds, dv, integration] = await Promise.all([
-      Bun.file("src/config/keybind.ts").text(),
-      Bun.file("src/feature-plugins/system/diff-viewer.tsx").text(),
-      Bun.file("src/feature-plugins/system/diff-viewer-annotations/integration.tsx").text(),
-    ])
-    expect(keybinds).not.toContain('keybind("p"')
-    for (const source of [dv, integration]) {
-      expect(source).toContain("n,N,J,K,e,],[")
-      expect(source).not.toContain("n,p,],[")
-    }
-  } finally {
-    viewer.app.renderer.destroy()
-  }
-})
-
-test("e opens the existing (renamed/new) side of the diff file with +line (TC-717, AC-7/AC-10)", async () => {
-  setupEditorFixture()
-  const savedVisual = process.env.VISUAL
-  const savedEditor = process.env.EDITOR
-  process.env.VISUAL = path.resolve(EDITOR_SCRIPT)
-  delete process.env.EDITOR
-  const viewer = await renderAnnotationsViewer([
-    {
-      file: "test/tmp-editor-fixture/old.ts",
-      patch: RENAMED_PATCH,
-      additions: 1,
-      deletions: 1,
-      status: "modified",
-    },
-  ])
-  try {
-    await run(viewer, "diff.open_file")
-    await until(() => readEditorArgs().length > 0, 8000)
-    const args = readEditorArgs()
-    // Курсор на первой контентной строке (+1); цель — новая сторона из +++ b/.
-    expect(args).toContain("+1")
-    expect(args[args.length - 1]).toBe("test/tmp-editor-fixture/renamed.ts")
-    expect(viewer.toasts()).toHaveLength(0)
-  } finally {
-    process.env.VISUAL = savedVisual
-    process.env.EDITOR = savedEditor
-    viewer.app.renderer.destroy()
-    rmSync(FIXTURE_DIR, { recursive: true, force: true })
-  }
-})
-
 test("e on a deleted file with no side on disk → toast, no launch (TC-718, AC-9)", async () => {
   const viewer = await renderAnnotationsViewer(withDiff(), { withDeletedFile: true })
   try {
@@ -892,10 +879,10 @@ test("send closes the viewer immediately; one prompt call; resolve consumes the 
     // начальный фокус 0 — «Отправить» (FR-X3); промис не резолвится — закрытие не ждёт его
     viewer.setPrompt(() => new Promise(() => {}))
     await run(viewer, "diff.annotate.exit.choose")
-    const closed = () => (viewer.current() as { name: string }).name === "session"
+    const closed = () => viewer.current().type === "session"
     await viewer.app.waitFor(closed)
     expect(viewer.promptCalls()).toHaveLength(1)
-    const text = viewer.promptCalls()[0].request.parts[0].text
+    const text = viewer.promptCalls()[0].request.text
     expect(text).toContain("Замечания по diff (1)")
     expect(text).toContain("send me")
 
@@ -918,7 +905,7 @@ test("resolve consumes the draft; no toast (TC-57, AC-10/FR-5)", async () => {
     await createAnnotationAtCursor(viewer, "resolved")
     await run(viewer, "diff.close")
     await run(viewer, "diff.annotate.exit.choose")
-    await viewer.app.waitFor(() => (viewer.current() as { name: string }).name === "session")
+    await viewer.app.waitFor(() => viewer.current().type === "session")
     await until(() => !draftExists("session-1"))
     expect(viewer.toasts()).toHaveLength(0)
   } finally {
@@ -936,9 +923,9 @@ test("rejection with the message already fixed consumes the draft (TC-56, AC-11/
       throw new Error("run crashed")
     })
     await run(viewer, "diff.annotate.exit.choose")
-    await viewer.app.waitFor(() => (viewer.current() as { name: string }).name === "session")
+    await viewer.app.waitFor(() => viewer.current().type === "session")
     // сообщение уже в истории: фиксация была, сломался прогон
-    const text = viewer.promptCalls()[0].request.parts[0].text
+    const text = viewer.promptCalls()[0].request.text
     viewer.setMessages([{ id: "m1", role: "user", text, type: "user", time: { created: 0 } }])
     await until(() => !draftExists("session-1"), 5000)
     expect(viewer.toasts()).toHaveLength(0)
@@ -957,7 +944,7 @@ test("rejection with no message keeps the draft and shows a toast (TC-55, AC-11/
       throw new Error("network down")
     })
     await run(viewer, "diff.annotate.exit.choose")
-    await viewer.app.waitFor(() => (viewer.current() as { name: string }).name === "session")
+    await viewer.app.waitFor(() => viewer.current().type === "session")
     // истории нет и не появится: после догона — toast, черновик цел
     await until(() => viewer.toasts().some((toast) => toast.title === "Ошибка отправки замечаний"), 9000)
     expect(draftExists("session-1")).toBe(true)
@@ -977,7 +964,7 @@ test("undefined message store is inconclusive: no toast until confirmed absence 
       throw new Error("boom")
     })
     await run(viewer, "diff.annotate.exit.choose")
-    await viewer.app.waitFor(() => (viewer.current() as { name: string }).name === "session")
+    await viewer.app.waitFor(() => viewer.current().type === "session")
     viewer.setMessages(undefined)
     await Bun.sleep(1500)
     expect(viewer.toasts()).toHaveLength(0)
@@ -1000,8 +987,8 @@ test("reopen with a hung send classifies against history and consumes the draft 
     await run(first, "diff.close")
     first.setPrompt(() => new Promise(() => {}))
     await run(first, "diff.annotate.exit.choose")
-    await first.app.waitFor(() => (first.current() as { name: string }).name === "session")
-    text = first.promptCalls()[0].request.parts[0].text
+    await first.app.waitFor(() => first.current().type === "session")
+    text = first.promptCalls()[0].request.text
   } finally {
     first.app.renderer.destroy()
   }
@@ -1026,7 +1013,7 @@ test("busy session does not delay closing (TC-60, AC-12/FR-5)", async () => {
     await run(viewer, "diff.close")
     viewer.setPrompt(() => new Promise(() => {}))
     await run(viewer, "diff.annotate.exit.choose")
-    await viewer.app.waitFor(() => (viewer.current() as { name: string }).name === "session")
+    await viewer.app.waitFor(() => viewer.current().type === "session")
     expect(viewer.promptCalls()).toHaveLength(1)
   } finally {
     viewer.app.renderer.destroy()
@@ -1045,7 +1032,7 @@ test("exit dialog has no sending machine: no waiting or error frames (TC-61, FR-
     expect(frame.includes("Ошибка отправки")).toBe(false)
     await run(viewer, "diff.annotate.exit.cancel")
     await viewer.app.flush()
-    expect((viewer.current() as { name: string }).name).toBe("diff")
+    expect(viewer.current().type).toBe("plugin")
     expect(getOrCreateDraft("session-1").count()).toBe(1)
   } finally {
     viewer.app.renderer.destroy()
@@ -1054,7 +1041,7 @@ test("exit dialog has no sending machine: no waiting or error frames (TC-61, FR-
 
 test("sessionless viewer cannot send; save-draft keeps the sessionless draft (FR-C4/X3, AC-23/34)", async () => {
   const viewer = await renderAnnotationsViewer(withDiff(), {
-    initialRoute: { name: "diff", params: { mode: "git", returnRoute: startRoute } },
+    initialRoute: { type: "plugin", id: "opencode.diffs", name: "diff", data: { returnRoute: startRoute } },
   })
   try {
     await cursorToFirstBodyLine(viewer)
@@ -1063,7 +1050,7 @@ test("sessionless viewer cannot send; save-draft keeps the sessionless draft (FR
     // «Отправить» недоступна с пояснением; начальный фокус — «Сохранить черновик» (FR-X3)
     await viewer.app.waitForFrame((frame) => frame.includes("нет сессии-владельца"))
     await run(viewer, "diff.annotate.exit.choose")
-    const closed = () => (viewer.current() as { name: string }).name === "session"
+    const closed = () => viewer.current().type === "session"
     await viewer.app.waitFor(closed)
     expect(viewer.promptCalls()).toHaveLength(0)
     expect(draftExists(SESSIONLESS_OWNER)).toBe(true)
@@ -1084,7 +1071,7 @@ test("reopening the viewer with a live draft asks for a fresh snapshot; decline 
     expect(viewer.commands.has("diff.annotate.confirm.decline")).toBe(true)
     // pressEscape отклоняет: открытие отменяется, черновик нетронут (FR-S5/S3)
     await run(viewer, "diff.annotate.confirm.decline")
-    const back = () => (viewer.current() as { name: string }).name === "session"
+    const back = () => viewer.current().type === "session"
     await viewer.app.waitFor(back)
     expect(getOrCreateDraft("session-1").count()).toBe(1)
     expect(getOrCreateDraft("session-1").visibleAnnotations()[0].text).toBe("survivor")
@@ -1106,7 +1093,7 @@ test("saved draft reopened with a fresh snapshot restores marks in renderer maps
     await first.app.waitForFrame((frame) => frame.includes("Сохранить"))
     await run(first, "diff.annotate.exit.next")
     await run(first, "diff.annotate.exit.choose")
-    await first.app.waitFor(() => (first.current() as { name: string }).name === "session")
+    await first.app.waitFor(() => first.current().type === "session")
     expect(draftExists("session-1")).toBe(true)
   } finally {
     first.app.renderer.destroy()
@@ -1121,34 +1108,6 @@ test("saved draft reopened with a fresh snapshot restores marks in renderer maps
     second.app.renderer.destroy()
   }
 }, 10000)
-
-test("diff.open from the diff route is an idempotent no-op (TC-62, AC-14/FR-6)", async () => {
-  const viewer = await renderAnnotationsViewer(withDiff())
-  try {
-    await until(() => (viewer.current() as { name: string }).name === "diff")
-    await run(viewer, "diff.open")
-    expect((viewer.current() as { name: string }).name).toBe("diff")
-    await run(viewer, "diff.close")
-    await viewer.app.waitFor(() => (viewer.current() as { name: string }).name === "session")
-    // returnRoute не переписан на diff-роут — возврат в сессию, не зацикливание
-    expect(viewer.current()).toEqual(startRoute)
-  } finally {
-    viewer.app.renderer.destroy()
-  }
-})
-
-test("help dialog lists the open-viewer shortcut (TC-63, AC-14/FR-6)", async () => {
-  const viewer = await renderAnnotationsViewer(withDiff())
-  try {
-    await run(viewer, "diff.help")
-    // Дерево файлов просвечивает сквозь диалог (наложение слоёв): строка
-    // «Open diff viewer» может быть частично перекрыта глифами дерева —
-    // проверяем фрагменты независимо, как в gotoInFrame.
-    await viewer.app.waitForFrame((frame) => frame.includes("diff viewer"))
-  } finally {
-    viewer.app.renderer.destroy()
-  }
-})
 
 // Узкая ячейка футера переносит «goto: N» и смешивает с колонками подсказок —
 // проверяем оба осколка независимо.
@@ -1172,53 +1131,12 @@ test("goto line: digits buffer in footer, enter jumps, escape cancels without cl
     await viewer.app.mockInput.pressEscape()
     await viewer.app.flush()
     await until(() => footerCell(viewer.app) === "3")
-    expect((viewer.current() as { name: string }).name).toBe("diff")
+    expect(viewer.current().type).toBe("plugin")
   } finally {
     viewer.app.renderer.destroy()
   }
 })
 
-test("compact view is default-on; «c» toggles back to the full patch (FR-8.x)", async () => {
-  const viewer = await renderAnnotationsViewer([
-    { file: "big.ts", patch: LONG_PATCH, additions: 2, deletions: 2, status: "modified" },
-  ], { width: 200 })
-  try {
-    await viewer.app.waitForFrame((frame) => frame.includes("new4"))
-    // дальний контекст скрыт, ближний — виден
-    expect(viewer.app.captureCharFrame().includes("c7")).toBe(false)
-    expect(viewer.app.captureCharFrame().includes("c6")).toBe(true)
-    await run(viewer, "diff.compact_toggle")
-    await viewer.app.waitForFrame((frame) => frame.includes("c7"))
-    // повторный тумгл возвращает компакт
-    await run(viewer, "diff.compact_toggle")
-    await viewer.app.waitForFrame((frame) => !frame.includes("c7"))
-  } finally {
-    viewer.app.renderer.destroy()
-  }
-})
-
-test("enter on a file in the tree shows it and moves focus to the patch pane (FR-3.x)", async () => {
-  const viewer = await renderAnnotationsViewer(withTwoFiles())
-  try {
-    await until(() => footerCell(viewer.app) === "1")
-    await run(viewer, "diff.switch_focus")
-    await run(viewer, "diff.annotate")
-    await viewer.app.flush()
-    // фокус в патчах: j двигает курсор (футер 1 → 2), а не выделение дерева
-    await run(viewer, "diff.down")
-    await until(() => footerCell(viewer.app) === "2")
-  } finally {
-    viewer.app.renderer.destroy()
-  }
-})
-
-// Кадровый ряд (0-based) первого вхождения текста — для якорных ассертов.
-function frameRow(app: Awaited<ReturnType<typeof testRender>>, text: string): number {
-  const lines = (app.captureCharFrame() as string).split("\n")
-  const row = lines.findIndex((line) => line.includes(text))
-  expect(row).toBeGreaterThanOrEqual(0)
-  return row
-}
 
 test("letters typed in the annotation editor never trigger panel commands (TC-510, FR-2.1/2.2)", async () => {
   const viewer = await renderAnnotationsViewer(withDiff())
@@ -1345,52 +1263,6 @@ test("empty annotations panel opens and closes (TC-522, FR-3.4)", async () => {
   }
 })
 
-test("compact toggle keeps the anchor line at its screen position (TC-230)", async () => {
-  const viewer = await renderAnnotationsViewer([{ file: "src/big.ts", patch: LONG_PATCH, additions: 2, deletions: 2, status: "modified" }], { height: 12 })
-  try {
-    await until(() => viewer.app.captureCharFrame().includes("new4"))
-    for (let i = 0; i < 3; i++) await run(viewer, "diff.down")
-    await until(() => footerCell(viewer.app) === "4")
-    const anchorRowBefore = frameRow(viewer.app, "new4")
-    await run(viewer, "diff.compact_toggle")
-    // Якорный скролл применяется двумя кадрами — даём кадрам пройти.
-    await Bun.sleep(150)
-    await viewer.app.flush()
-    expect(frameRow(viewer.app, "new4")).toBe(anchorRowBefore)
-    // Обратный тумгл тоже сохраняет экранную позицию якоря.
-    await run(viewer, "diff.compact_toggle")
-    await Bun.sleep(150)
-    await viewer.app.flush()
-    expect(frameRow(viewer.app, "new4")).toBe(anchorRowBefore)
-  } finally {
-    viewer.app.renderer.destroy()
-  }
-})
-
-test("compact toggle from a line hidden in compact mode relocates deterministically (TC-231)", async () => {
-  const viewer = await renderAnnotationsViewer([{ file: "src/big.ts", patch: LONG_PATCH, additions: 2, deletions: 2, status: "modified" }], { height: 12 })
-  try {
-    await until(() => viewer.app.captureCharFrame().includes("new4"))
-    await run(viewer, "diff.compact_toggle")
-    await Bun.sleep(150)
-    await viewer.app.flush()
-    // Курсор на c7 — строке, скрытой компакт-режимом (c2 → c7 — шесть шагов).
-    for (let i = 0; i < 6; i++) await run(viewer, "diff.down")
-    await until(() => footerCell(viewer.app) === "7")
-    const anchorRowBefore = frameRow(viewer.app, "c7")
-    await run(viewer, "diff.compact_toggle")
-    await Bun.sleep(150)
-    await viewer.app.flush()
-    // Курсор relocated на видимую контентную строку, экранная позиция якоря
-    // сохранена в пределах клампа (верх скролла).
-    expect(Number(footerCell(viewer.app))).toBeGreaterThan(0)
-    const relocated = Number(footerCell(viewer.app))
-    expect(Math.abs(frameRow(viewer.app, `c${relocated}`) - anchorRowBefore)).toBeLessThanOrEqual(1)
-  } finally {
-    viewer.app.renderer.destroy()
-  }
-})
-
 test("bracket hotkeys navigate hunks with swapped semantics and stop at boundaries (TC-240)", async () => {
   const viewer = await renderAnnotationsViewer(withTwoHunks())
   try {
@@ -1412,274 +1284,3 @@ test("bracket hotkeys navigate hunks with swapped semantics and stop at boundari
   }
 })
 
-test("footer help reflects the swapped bracket bindings (TC-241)", async () => {
-  const viewer = await renderAnnotationsViewer(withTwoHunks(), { width: 200 })
-  try {
-    await until(() => viewer.app.captureCharFrame().includes("two!"))
-    const hints = (viewer.app.captureCharFrame() as string).replace(/\s+/g, " ")
-    expect(hints.includes("[ next hunk")).toBe(true)
-    expect(hints.includes("] previous hunk")).toBe(true)
-  } finally {
-    viewer.app.renderer.destroy()
-  }
-})
-
-// ---------------------------------------------------------------------------
-// Goto-файл в дереве (итерация 006): цифровой буфер в фокусе дерева, зеркальный
-// goto-строке. Кадровые ассерты — «goto file» отдельно от «goto» строки.
-// ---------------------------------------------------------------------------
-
-// Широкий кадр (width 200): ячейка «goto file: N» футера не переносится,
-// матчим контигуозно.
-function frameText(app: Awaited<ReturnType<typeof testRender>>): string {
-  return (app.captureCharFrame() as string | undefined) ?? ""
-}
-
-function gotoFileInFrame(app: Awaited<ReturnType<typeof testRender>>, digits: string): boolean {
-  return frameText(app).includes(`goto file: ${digits}`)
-}
-
-function gotoFileAbsent(app: Awaited<ReturnType<typeof testRender>>): boolean {
-  return !frameText(app).includes("goto file:")
-}
-
-const withThreeFiles = () => [
-  { file: "src/file.ts", patch: PATCH, additions: 1, deletions: 1, status: "modified" },
-  { file: "other.ts", patch: SECOND_FILE, additions: 1, deletions: 1, status: "modified" },
-  { file: "z/last.ts", patch: TWO_HUNKS, additions: 2, deletions: 2, status: "modified" },
-]
-
-// 12 файлов в трёх каталогах; плоский порядок (алфавит внутри каталога):
-// dir0: f0,f3,f6,f9 · dir1: f1,f10,f4,f7 · dir2: f2,f5,f8,f11 — №12 = f11.ts.
-const withTwelveFiles = () =>
-  Array.from({ length: 12 }, (_, i) => ({
-    file: `dir${i % 3}/f${i}.ts`,
-    patch: PATCH,
-    additions: 1,
-    deletions: 1,
-    status: "modified" as const,
-  }))
-
-// Фокус в дереве + подтверждённая готовность диффа.
-async function focusFileTree(handle: HarnessHandle) {
-  await until(() => footerCell(handle.app) === "1")
-  await run(handle, "diff.switch_focus")
-  await handle.app.flush()
-}
-
-test("goto file: valid number jumps, reveals the file and moves focus to patches (TC-610/AC-1)", async () => {
-  const viewer = await renderAnnotationsViewer(withThreeFiles(), { width: 200 })
-  try {
-    await focusFileTree(viewer)
-    await run(viewer, "diff.gotofile.digit.2")
-    await until(() => gotoFileInFrame(viewer.app, "2"))
-    await run(viewer, "diff.gotofile.commit")
-    await viewer.app.flush()
-    await until(() => gotoFileAbsent(viewer.app))
-    // Фокус ушёл в патчи: j двигает курсор (номер в футере 1 → 2)
-    await run(viewer, "diff.down")
-    await until(() => footerCell(viewer.app) === "2")
-  } finally {
-    viewer.app.renderer.destroy()
-  }
-})
-
-test("goto file: multi-digit number does not fire early (TC-611/AC-2)", async () => {
-  const viewer = await renderAnnotationsViewer(withTwelveFiles(), { width: 200 })
-  try {
-    await focusFileTree(viewer)
-    await run(viewer, "diff.gotofile.digit.1")
-    await until(() => gotoFileInFrame(viewer.app, "1"))
-    await run(viewer, "diff.gotofile.append.2")
-    await until(() => gotoFileInFrame(viewer.app, "12"))
-    await run(viewer, "diff.gotofile.commit")
-    await viewer.app.flush()
-    await until(() => gotoFileAbsent(viewer.app))
-    // Файл №12 раскрыт и выбран; фокус в патчах
-    expect(viewer.app.captureCharFrame().includes("f11.ts")).toBe(true)
-    await run(viewer, "diff.down")
-    await until(() => footerCell(viewer.app) === "2")
-  } finally {
-    viewer.app.renderer.destroy()
-  }
-})
-
-test("goto file: zero, out-of-range and empty input are a quiet reset (TC-612/AC-6/7)", async () => {
-  const viewer = await renderAnnotationsViewer(withThreeFiles(), { width: 200 })
-  try {
-    await focusFileTree(viewer)
-    for (const digit of ["9", "0"]) {
-      await run(viewer, `diff.gotofile.digit.${digit}`)
-      await until(() => gotoFileInFrame(viewer.app, digit))
-      await run(viewer, "diff.gotofile.commit")
-      await viewer.app.flush()
-      // Тихий сброс: буфер скрыт, фокус остался в дереве
-      await until(() => gotoFileAbsent(viewer.app))
-    }
-    // enter на пустом буфере — no-op без ошибок
-    await run(viewer, "diff.gotofile.commit")
-    await viewer.app.flush()
-    expect(gotoFileAbsent(viewer.app)).toBe(true)
-    // Фокус в дереве: switch_focus возвращает в патчи, j там двигает курсор
-    await run(viewer, "diff.switch_focus")
-    await run(viewer, "diff.down")
-    await until(() => footerCell(viewer.app) === "2")
-  } finally {
-    viewer.app.renderer.destroy()
-  }
-})
-
-test("goto file: escape mid-input cancels without side effects (TC-613/AC-8)", async () => {
-  const viewer = await renderAnnotationsViewer(withThreeFiles(), { width: 200 })
-  try {
-    await focusFileTree(viewer)
-    await run(viewer, "diff.gotofile.digit.1")
-    await until(() => gotoFileInFrame(viewer.app, "1"))
-    await viewer.app.mockInput.pressEscape()
-    await viewer.app.flush()
-    await until(() => gotoFileAbsent(viewer.app))
-    expect((viewer.current() as { name: string }).name).toBe("diff")
-  } finally {
-    viewer.app.renderer.destroy()
-  }
-})
-
-test("goto file: command key typed during input cancels and is swallowed (TC-614/AC-11)", async () => {
-  const viewer = await renderAnnotationsViewer(withThreeFiles(), { width: 200 })
-  try {
-    await focusFileTree(viewer)
-    // Цифра запускает режим через реальный ввод
-    await typeIntoFocused(viewer, "3")
-    await until(() => gotoFileInFrame(viewer.app, "3"))
-    // Навигационная клавиша viewer отменяет ввод и поглощается: буфер исчез,
-    // viewer не закрылся и не перешёл к файлу
-    await typeIntoFocused(viewer, "j")
-    await until(() => gotoFileAbsent(viewer.app))
-    expect((viewer.current() as { name: string }).name).toBe("diff")
-  } finally {
-    viewer.app.renderer.destroy()
-  }
-})
-
-test("goto file: digits beyond the buffer cap are silently ignored (TC-615/AC-13)", async () => {
-  const viewer = await renderAnnotationsViewer(withThreeFiles(), { width: 200 })
-  try {
-    await focusFileTree(viewer)
-    for (let i = 0; i < 9; i++) await run(viewer, "diff.gotofile.append.9")
-    await until(() => gotoFileInFrame(viewer.app, "9999999"))
-    expect(viewer.app.captureCharFrame().includes(": 99999999")).toBe(false)
-  } finally {
-    viewer.app.renderer.destroy()
-  }
-})
-
-test("goto file: backspace to empty exits the mode; new digit starts fresh (TC-616/AC-23)", async () => {
-  const viewer = await renderAnnotationsViewer(withThreeFiles(), { width: 200 })
-  try {
-    await focusFileTree(viewer)
-    await run(viewer, "diff.gotofile.digit.1")
-    await run(viewer, "diff.gotofile.append.2")
-    await until(() => gotoFileInFrame(viewer.app, "12"))
-    await run(viewer, "diff.gotofile.backspace")
-    await until(() => gotoFileInFrame(viewer.app, "1"))
-    await run(viewer, "diff.gotofile.backspace")
-    await until(() => gotoFileAbsent(viewer.app))
-    // Третий backspace — выход без побочных эффектов; новый ввод — новый буфер
-    await run(viewer, "diff.gotofile.backspace")
-    await run(viewer, "diff.gotofile.digit.2")
-    await until(() => gotoFileInFrame(viewer.app, "2"))
-  } finally {
-    viewer.app.renderer.destroy()
-  }
-})
-
-test("goto file: numbers survive directory collapsing (flat order) (TC-617/AC-14)", async () => {
-  const viewer = await renderAnnotationsViewer([
-    { file: "a/x.ts", patch: PATCH, additions: 1, deletions: 1, status: "modified" },
-    { file: "a/y.ts", patch: TWO_HUNKS, additions: 2, deletions: 2, status: "modified" },
-    { file: "z.ts", patch: SECOND_FILE, additions: 1, deletions: 1, status: "modified" },
-  ], { width: 200 })
-  try {
-    await focusFileTree(viewer)
-    // Выделение на первом файле a/x.ts → collapse уходит на родителя a,
-    // повторный collapse сворачивает каталог
-    await run(viewer, "diff.collapse")
-    await run(viewer, "diff.collapse")
-    await viewer.app.flush()
-    // №2 по плоскому порядку — a/y.ts, несмотря на свёрнутый каталог
-    await run(viewer, "diff.gotofile.digit.2")
-    await until(() => gotoFileInFrame(viewer.app, "2"))
-    await run(viewer, "diff.gotofile.commit")
-    await viewer.app.flush()
-    await until(() => gotoFileAbsent(viewer.app))
-    await run(viewer, "diff.down")
-    await until(() => footerCell(viewer.app) === "2")
-  } finally {
-    viewer.app.renderer.destroy()
-  }
-})
-
-test("goto file: hidden tree (single file) keeps digits inert; goto line still works (TC-618/AC-15)", async () => {
-  const viewer = await renderAnnotationsViewer(withDiff(), { width: 200 })
-  try {
-    await until(() => footerCell(viewer.app) === "1")
-    await typeIntoFocused(viewer, "3")
-    await viewer.app.flush()
-    expect(gotoFileAbsent(viewer.app)).toBe(true)
-    // goto-строка в фокусе патчей продолжает работать
-    await run(viewer, "diff.goto.digit.3")
-    await until(() => gotoInFrame(viewer.app, "3"))
-  } finally {
-    viewer.app.renderer.destroy()
-  }
-})
-
-test("goto file: mutual exclusion with goto line; focus loss resets the buffer (TC-619/AC-21/22)", async () => {
-  const viewer = await renderAnnotationsViewer(withThreeFiles(), { width: 200 })
-  try {
-    await focusFileTree(viewer)
-    await typeIntoFocused(viewer, "3")
-    await until(() => gotoFileInFrame(viewer.app, "3"))
-    // Уход фокуса в патчи сбрасывает буфер дерева; goto-строка активна
-    await run(viewer, "diff.switch_focus")
-    await until(() => gotoFileAbsent(viewer.app))
-    await run(viewer, "diff.goto.digit.4")
-    await until(() => gotoInFrame(viewer.app, "4"))
-    expect(gotoFileAbsent(viewer.app)).toBe(true)
-    // Назад в дерево: старый буфер не восстановился, новый ввод — новый буфер
-    await run(viewer, "diff.switch_focus")
-    await until(() => !viewer.app.captureCharFrame().includes("goto: 4"))
-    await run(viewer, "diff.gotofile.digit.3")
-    await until(() => gotoFileInFrame(viewer.app, "3"))
-    expect(viewer.app.captureCharFrame().includes("goto: 3")).toBe(false)
-  } finally {
-    viewer.app.renderer.destroy()
-  }
-})
-
-test("goto file: overlays own the input; opening one resets a live buffer (TC-620/AC-9/10)", async () => {
-  const viewer = await renderAnnotationsViewer(withDiff(), { width: 200 })
-  try {
-    await cursorToFirstBodyLine(viewer)
-    await createAnnotationAtCursor(viewer, "target")
-    await run(viewer, "diff.annotations_panel")
-    await viewer.app.waitForFrame((frame) => frame.includes("target"))
-    // Оверлей владеет вводом: цифры не попадают в goto-буфер
-    await typeIntoFocused(viewer, "12")
-    await viewer.app.flush()
-    expect(gotoFileAbsent(viewer.app)).toBe(true)
-    // Живой буфер сбрасывается открытием оверлея и не возобновляется
-    await run(viewer, "diff.annotate.panel.close")
-    await focusFileTree(viewer)
-    await typeIntoFocused(viewer, "3")
-    await until(() => gotoFileInFrame(viewer.app, "3"))
-    await run(viewer, "diff.annotations_panel")
-    await viewer.app.flush()
-    await until(() => gotoFileAbsent(viewer.app))
-    await run(viewer, "diff.annotate.panel.close")
-    await viewer.app.flush()
-    expect(gotoFileAbsent(viewer.app)).toBe(true)
-  } finally {
-    viewer.app.renderer.destroy()
-  }
-})

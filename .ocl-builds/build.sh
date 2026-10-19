@@ -12,7 +12,7 @@ set -euo pipefail
 
 REPO="/home/vsixer/Projects/opencode"
 OUT="$REPO/.ocl-builds"
-PKG="$REPO/packages/opencode"
+PKG="$REPO/packages/cli"
 
 usage() {
   cat <<EOF

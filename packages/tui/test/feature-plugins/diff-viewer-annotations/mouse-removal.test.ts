@@ -2,19 +2,14 @@ import { describe, expect, test } from "bun:test"
 import { readFileSync } from "fs"
 import path from "path"
 
-// Структурная негатив-проверка: мышиный контур аннотирования удалён из кода.
-// Дублирует grep-гейт локальным прогоном; клики дерева файлов (file-tree) —
-// вне контура и исключены (FR-1.3).
-
+// Структурная негатив-проверка: движок аннотирования остаётся чисто клавиатурным —
+// в нём нет мышиных обработчиков и обратного маппинга рядов. Мышиный контур
+// оболочки viewer (меню файла, подсказки) принадлежит upstream-фиче и движок
+// не касается.
 const src = (...parts: string[]) =>
   readFileSync(path.join(import.meta.dir, "../../../src/feature-plugins/system", ...parts), "utf8")
 
-describe("mouse circuit removal (TC-560)", () => {
-  test("diff-viewer wrapper box has no mouse props", () => {
-    const source = src("diff-viewer.tsx")
-    expect(source).not.toMatch(/onMouseMove|onMouseUp|onMouseOut/)
-  })
-
+describe("annotation engine is mouse-free (TC-560)", () => {
   test("annotation integration has no mouse handlers or reverse row mapping", () => {
     for (const file of [
       "diff-viewer-annotations/integration.tsx",
@@ -32,14 +27,5 @@ describe("mouse circuit removal (TC-560)", () => {
   test("harness does not expose mockMouse", () => {
     const source = readFileSync(path.join(import.meta.dir, "../../cli/tui/diff-viewer-annotations.test.tsx"), "utf8")
     expect(source).not.toMatch(/mockMouse/)
-  })
-})
-
-describe("help and docs are mouse-free (TC-561)", () => {
-  test("feature sources mention no mouse interactions", () => {
-    for (const file of ["diff-viewer.tsx", "diff-viewer-ui.tsx"]) {
-      const source = src(file)
-      expect(source, file).not.toMatch(/мышь|клик|hover|mouse/i)
-    }
   })
 })

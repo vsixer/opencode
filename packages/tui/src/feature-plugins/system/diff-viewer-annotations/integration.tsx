@@ -1,8 +1,9 @@
 /** @jsxImportSource @opentui/solid */
-import type { TuiPluginApi, TuiRouteCurrent } from "@opencode-ai/plugin/tui"
 import type { BoxRenderable, DiffRenderable, ScrollBoxRenderable } from "@opentui/core"
+import type { KeymapCommand } from "@opencode/plugin/tui/context"
 import { Show, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js"
-import { useBindings } from "../../../keymap"
+import { useBindings } from "@opentui/keymap/solid"
+import type { DiffAnnotationsApi } from "./api"
 import type { DiffFile } from "./patch-lines"
 import {
   annotatableBodyLine,
@@ -64,12 +65,15 @@ const DECORATION_SETTLE_FRAMES = 8
 // Watchdog: async-rebuild'ы рендерера (подсветка синтаксиса, resize) приходят позже
 // любых rAF-проходов и стирают декорации; пере-применение дёшево (no-op без изменений).
 const DECORATION_WATCHDOG_MS = 250
+// Сколько пустых (не изменивших декорации) проходов подряд держать watchdog
+// включённым: после устойчивой стабилизации он выключается до следующей смены view.
+const DECORATION_WATCHDOG_STABLE_STOP = 6
 
 // Контекст viewer, необходимый аннотированию. diff-viewer.tsx собирает его после создания
 // своих сигналов/узлов; модуль не знает о внутренностях рендера патча.
 export type DiffAnnotationsContext = {
-  readonly api: TuiPluginApi
-  readonly params: () => { sessionID?: string; returnRoute?: TuiRouteCurrent } | undefined
+  readonly api: DiffAnnotationsApi
+  readonly sessionID: string | undefined
   readonly files: () => readonly DiffFile[]
   readonly diffReady: () => boolean
   readonly focus: () => "patches" | "files"
@@ -80,7 +84,7 @@ export type DiffAnnotationsContext = {
   readonly visiblePatchFiles: () => readonly { readonly file: DiffFile; readonly fileIndex: number }[]
   readonly getScroll: () => ScrollBoxRenderable | undefined
   readonly patchNodeByFileIndex: Map<number, BoxRenderable>
-  readonly diffNodeByFileIndex: Map<number, DiffRenderable>
+  readonly diffNodeFor: (fileIndex: number) => DiffRenderable | undefined
   readonly patchPaneWidth: () => number
   readonly view: () => "split" | "unified"
   readonly reviewedFileNames: () => ReadonlySet<string>
@@ -106,8 +110,8 @@ type Overlay =
 export function createDiffAnnotations(ctx: DiffAnnotationsContext) {
   const api = ctx.api
   // Владелец фиксируется при открытии viewer и не переходит к другим (FR-C5).
-  const sessionID = ctx.params()?.sessionID
-  const ownerKey = sessionID ?? SESSIONLESS_OWNER
+  const ownerSessionID = ctx.sessionID
+  const ownerKey = ownerSessionID ?? SESSIONLESS_OWNER
   const record = getOrCreateDraftRecord(ownerKey)
   const store: AnnotationStore = record.store
 
@@ -216,7 +220,7 @@ export function createDiffAnnotations(ctx: DiffAnnotationsContext) {
     const scroll = ctx.getScroll()
     const line = flatLines()[index]
     if (!scroll || !line) return undefined
-    const diffNode = ctx.diffNodeByFileIndex.get(line.fileIndex)
+    const diffNode = ctx.diffNodeFor(line.fileIndex)
     if (!diffNode || diffNode.isDestroyed) return undefined
     const base = scroll.scrollTop + diffNode.y - scroll.viewport.y
     return base + unifiedRowsBefore(parsedLinesFor(line.fileIndex), line.lineIndex, unifiedWrapColumn(diffNode.width))
@@ -228,8 +232,13 @@ export function createDiffAnnotations(ctx: DiffAnnotationsContext) {
     const scroll = ctx.getScroll()
     const contentY = contentYAt(index)
     if (!scroll || contentY === undefined) return
+    // Пока кадр ждёт rAF, прокрутка могла уйти (пользователь, команды viewer):
+    // коррекция по устаревшей позиции отменяется — движение курсора не спорит
+    // со свободным скроллом.
+    const scheduledTop = scroll.scrollTop
     requestAnimationFrame(() => {
       if (!scroll || scroll.isDestroyed) return
+      if (scroll.scrollTop !== scheduledTop) return
       const top = scroll.scrollTop
       const bottom = scroll.scrollTop + scroll.viewport.height
       if (contentY < top + 1) scroll.scrollTo(Math.max(0, contentY))
@@ -334,14 +343,20 @@ export function createDiffAnnotations(ctx: DiffAnnotationsContext) {
   // false, если хотя бы у одного узла стороны ещё не построены (rebuild асинхронен) —
   // вызывающий планировщик повторяет проход. В split дополнительно нужен rAF-повтор:
   // синхронный проход мог читать до-rebuild'ные карты (план §5.6).
+  // Применялись ли изменения при последнем applyDecorations: серия no-op-проходов
+  // глушит watchdog (постоянный фоновый тик — лишняя нагрузка на цикл рендера).
+  let decorationsChangedLastApply = false
+
+  // Возвращает false, если хотя бы у одного узла стороны ещё не построены.
   function applyDecorations(): boolean {
-    const theme = api.theme.current
+    const theme = api.theme
     const cursorLine = currentLine()
     const boundAnnotations = store.visibleAnnotations().filter((annotation) => annotation.state === "bound")
     const lines = flatLines()
     let complete = true
+    let changed = false
     for (const entry of ctx.visiblePatchFiles()) {
-      const node = ctx.diffNodeByFileIndex.get(entry.fileIndex)
+      const node = ctx.diffNodeFor(entry.fileIndex)
       if (!node || node.isDestroyed) continue
       const sides = diffSides(node)
       // Стороны строятся асинхронно — пропуск без полного OFF; окончательное
@@ -381,7 +396,7 @@ export function createDiffAnnotations(ctx: DiffAnnotationsContext) {
             content: theme.diffCursorLineBg,
           })
         }
-        mergerFor(sides.left).apply(overlays)
+        if (mergerFor(sides.left).apply(overlays)) changed = true
         continue
       }
       const leftIndex = invertLineNumbers(sides.left.getLineNumbers())
@@ -412,9 +427,10 @@ export function createDiffAnnotations(ctx: DiffAnnotationsContext) {
       if (cursorRow?.right !== undefined) {
         rightOverlays.push({ rows: [cursorRow.right], gutter: theme.diffCursorLineBg, content: theme.diffCursorLineBg })
       }
-      mergerFor(sides.left).apply(leftOverlays)
-      mergerFor(sides.right).apply(rightOverlays)
+      if (mergerFor(sides.left).apply(leftOverlays)) changed = true
+      if (mergerFor(sides.right).apply(rightOverlays)) changed = true
     }
+    decorationsChangedLastApply = changed
     return complete
   }
 
@@ -427,7 +443,7 @@ export function createDiffAnnotations(ctx: DiffAnnotationsContext) {
     ctx.patchPaneWidth()
     ctx.reviewedFileNames()
     const ready = ctx.diffReady()
-    api.theme.current
+    if (!ready) return
     if (!ready) return
     let retries = 0
     let frames = 0
@@ -449,12 +465,31 @@ export function createDiffAnnotations(ctx: DiffAnnotationsContext) {
   })
 
   // Watchdog: покрывает поздние async-rebuild'ы рендерера, пришедшие после того,
-  // как rAF-цепочка исчерпана; без изменений применение — no-op.
-  const decorationWatchdog = setInterval(() => {
-    if (!ctx.diffReady()) return
-    applyDecorations()
-  }, DECORATION_WATCHDOG_MS)
-  onCleanup(() => clearInterval(decorationWatchdog))
+  // как rAF-цепочка исчерпана; без изменений применение — no-op. Серия пустых
+  // проходов останавливает таймер: постоянный фоновой тик даёт лишнюю нагрузку
+  // на цикл рендера; при смене view/файлов/декораций watchdog перезапускается.
+  let watchdogStablePasses = 0
+  let decorationWatchdog: ReturnType<typeof setInterval> | undefined
+  const startDecorationWatchdog = () => {
+    if (decorationWatchdog) return
+    watchdogStablePasses = 0
+    decorationWatchdog = setInterval(() => {
+      if (!ctx.diffReady()) return
+      applyDecorations()
+      if (decorationsChangedLastApply) {
+        watchdogStablePasses = 0
+        return
+      }
+      watchdogStablePasses += 1
+      if (watchdogStablePasses >= DECORATION_WATCHDOG_STABLE_STOP && decorationWatchdog) {
+        clearInterval(decorationWatchdog)
+        decorationWatchdog = undefined
+      }
+    }, DECORATION_WATCHDOG_MS)
+  }
+  onCleanup(() => decorationWatchdog && clearInterval(decorationWatchdog))
+  startDecorationWatchdog()
+  createEffect(on([ctx.view, ctx.files], () => startDecorationWatchdog()))
 
   // Предикат §10 (контекстная часть): дифф готов ∧ фокус patches ∧ строка — тело ∧ файл
   // не удалён. Занятая строка → правка, свободная → создание, иначе no-op.
@@ -550,7 +585,7 @@ export function createDiffAnnotations(ctx: DiffAnnotationsContext) {
     const identity = anchorLine
       ? { fileIndex: anchorLine.fileIndex, side: anchorLine.side, lineNumber: anchorLine.lineNumber, kind: anchorLine.kind }
       : undefined
-    const anchorNode = anchorLine ? ctx.diffNodeByFileIndex.get(anchorLine.fileIndex) : undefined
+    const anchorNode = anchorLine ? ctx.diffNodeFor(anchorLine.fileIndex) : undefined
     const wrapColumn = anchorNode && !anchorNode.isDestroyed ? unifiedWrapColumn(anchorNode.width) : undefined
     const anchorRows =
       wrapColumn !== undefined && anchorLine
@@ -609,16 +644,10 @@ export function createDiffAnnotations(ctx: DiffAnnotationsContext) {
   }
 
   const canSend = createMemo(() => {
-    if (sessionID === undefined) return false
-    return api.state.session.get(sessionID) !== undefined
+    if (ownerSessionID === undefined) return false
+    return api.data.session.get(ownerSessionID) !== undefined
   })
 
-  function lastUserMessage() {
-    if (sessionID === undefined) return undefined
-    const messages = api.state.session.messages?.(sessionID)
-    if (!messages) return undefined
-    return [...messages].reverse().find((message) => message.role === "user")
-  }
 
   // Поглощение черновика по доказательству фиксации (FR-5, план §9): resolve промиса
   // либо обнаружение собранного сообщения в истории при rejection. Идемпотентно.
@@ -633,13 +662,14 @@ export function createDiffAnnotations(ctx: DiffAnnotationsContext) {
   // Тип Message в plugin API — метаданные без текста; фактический стор хранит
   // SessionMessage с полем text, читаем структурно.
   function messageInHistory(message: string): boolean | undefined {
-    if (sessionID === undefined) return false
-    const messages = api.state.session.messages?.(sessionID)
+    if (ownerSessionID === undefined) return false
+    const messages = api.data.session.message.list(ownerSessionID)
+    // undefined — стор не загружен (inconclusive): ни toast, ни поглощения
+    // до подтверждённого отсутствия.
     if (!messages) return undefined
     return messages.some((msg) => {
-      if (msg.role !== "user") return false
-      const text = (msg as { text?: unknown }).text
-      return text === message
+      if (msg.type !== "user") return false
+      return msg.text === message
     })
   }
 
@@ -663,13 +693,13 @@ export function createDiffAnnotations(ctx: DiffAnnotationsContext) {
     }
     // Полный сбой фиксации: черновик цел и доступен при повторном открытии (AC-11).
     clearDraftSendInitiated(ownerKey)
-    api.ui.toast({ variant: "error", title: "Ошибка отправки замечаний", message: errorText })
+    api.ui.toast.show({ variant: "error", title: "Ошибка отправки замечаний", message: errorText })
   }
 
   // Отправка (FR-5): fire-and-forget session.prompt + немедленное закрытие viewer.
   // Сборка сообщения детерминирована из стора в момент отправки («всё или ничего»).
   function send() {
-    if (!canSend() || sessionID === undefined) return
+    if (!canSend() || ownerSessionID === undefined) return
     // Реентерабельность исключена синхронным гардом и немедленным закрытием диалога.
     if (sendInitiated) return
     sendInitiated = true
@@ -689,9 +719,9 @@ export function createDiffAnnotations(ctx: DiffAnnotationsContext) {
       })),
       ctx.files(),
     )
-    const request = buildPromptRequest(sessionID, api.state.session.get(sessionID), lastUserMessage(), message)
+    const request = buildPromptRequest(ownerSessionID, message)
     markDraftSendInitiated(ownerKey, message, undefined)
-    api.client.session.prompt(request, { throwOnError: true }).then(
+    api.client.session.prompt(request).then(
       () => consumeDraft(),
       (error: unknown) => {
         const errorText = error instanceof Error ? error.message : String(error)
@@ -803,19 +833,17 @@ export function createDiffAnnotations(ctx: DiffAnnotationsContext) {
       // отменяет без поглощения — фокус уходит по назначению клавиши (FR-4.9).
       { key: "tab", cmd: "diff.goto.tab", fallthrough: true },
       {
-        key: "j,down,k,up,n,N,J,K,e,],[,b,s,o,v,m,E,q,a,d,c,g,?,space,right,left,pageup,pagedown,ctrl+f,ctrl+b",
+        key: "j,down,k,up,n,N,shift+j,shift+k,e,],[,b,s,o,v,m,E,q,a,d,shift+d,c,g,?,space,right,left,pageup,pagedown,ctrl+f,ctrl+b",
         cmd: "diff.goto.cancel",
       },
     ],
   }))
 
-  const commands = [
+  const commands: KeymapCommand[] = [
     {
-      name: "diff.annotate",
+      id: "diff.annotate",
       title: "Annotate diff line",
-      category: "VCS",
-      slashName: "diff-annotate",
-      namespace: "palette",
+      group: "VCS",
       run() {
         // Enter в фокусе дерева: файл — показать и перевести фокус в diff,
         // папка — toggle с сохранением фокуса в дереве (FR-3.1–3.3).
@@ -827,21 +855,17 @@ export function createDiffAnnotations(ctx: DiffAnnotationsContext) {
       },
     },
     {
-      name: "diff.annotate_delete",
+      id: "diff.annotate_delete",
       title: "Delete annotation on line",
-      category: "VCS",
-      slashName: "diff-annotate-delete",
-      namespace: "palette",
+      group: "VCS",
       run() {
         requestDeleteAtCursor()
       },
     },
     {
-      name: "diff.annotations_panel",
+      id: "diff.annotations_panel",
       title: "Toggle annotations panel",
-      category: "VCS",
-      slashName: "diff-annotations",
-      namespace: "palette",
+      group: "VCS",
       run() {
         togglePanel()
       },
@@ -880,7 +904,7 @@ export function createDiffAnnotations(ctx: DiffAnnotationsContext) {
           api={api}
           count={() => store.count()}
           canSend={canSend}
-          sessionless={() => sessionID === undefined}
+          sessionless={() => ownerSessionID === undefined}
           onSend={() => send()}
           onSaveDraft={() => {
             popAllOverlays()

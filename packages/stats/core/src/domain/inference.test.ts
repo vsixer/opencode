@@ -128,6 +128,12 @@ describe("inference stat normalization", () => {
     expect(statModel("x-preview-f", "")).toBe("glm-5.3-flash")
     expect(statModel("ox-alpha", "")).toBe("glm-5.3-flash")
     expect(statModel("ox-alpha-free", "")).toBe("glm-5.3-flash")
+    expect(statModel("cat-jam-free", "")).toBe("beam")
+    expect(statModel("beam-free", "")).toBe("beam")
+    expect(RETIRED_STAT_MODELS).toContain("cat-jam")
+    expect(statProvider("cat-jam-free", "", "unknown")).toBe("reflection")
+    expect(statProvider("beam-free", "", "unknown")).toBe("reflection")
+    expect(statModel("glm-5.3-flash-free", "")).toBe("glm-5.3-flash")
     expect(statModel("big-pickle", "zhipuai/ox-alpha-free")).toBe("glm-5.3-flash")
     expect(statModel("xiaomi/mimo-v2.5", "")).toBe("mimo-v2.5")
     expect(toModelAggregate(aggregate("x-preview-f", "unknown"))).toMatchObject([
@@ -140,7 +146,13 @@ describe("inference stat normalization", () => {
   })
 
   test("renames DeepSeek Flash to V4.1 without merging V4 or vision usage", () => {
-    ;["deepseek-flash", "DEEPSEEK-FLASH-free:global", "deepseek-v4.1-flash"].forEach((model) => {
+    ;[
+      "deepseek-flash",
+      "DEEPSEEK-FLASH-free:global",
+      "deepseek-v4.1-flash",
+      "deepseek-v4.1-flash-free",
+      "deepseek-v4-1-flash-opencode-bo44an",
+    ].forEach((model) => {
       expect(statModel(model, "")).toBe("deepseek-v4.1-flash")
       expect(toModelAggregate(aggregate(model, "deepseek"))).toMatchObject([
         { model: "deepseek-v4.1-flash", provider: "deepseek" },
@@ -153,9 +165,11 @@ describe("inference stat normalization", () => {
       ])
     })
     expect(statModel("big-pickle", "deepseek/deepseek-flash")).toBe("deepseek-v4.1-flash")
+    expect(statModel("big-pickle", "radixark/deepseek-v4-1-flash-opencode-bo44an")).toBe("deepseek-v4.1-flash")
     expect(statModel("deepseek-v4-flash", "")).toBe("deepseek-v4-flash")
     expect(statModel("deepseek-v4-flash-vision-exp", "")).toBe("deepseek-v4-flash-vision-exp")
     expect(RETIRED_STAT_MODELS).toContain("deepseek-flash")
+    expect(RETIRED_STAT_MODELS).toContain("deepseek-v4-1-flash-opencode-bo44an")
     expect(RETIRED_STAT_MODELS).not.toContain("deepseek-v4.1-flash")
   })
 

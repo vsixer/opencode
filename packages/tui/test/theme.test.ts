@@ -3,66 +3,153 @@ import { mkdir, writeFile } from "node:fs/promises"
 import path from "node:path"
 import type { TerminalColors } from "@opentui/core"
 import { RGBA } from "@opentui/core"
-import { DEFAULT_THEMES, addTheme, allThemes, hasTheme, resolveTheme, terminalMode } from "../src/theme"
-import { discoverThemes } from "../src/context/theme"
+import { allThemes, hasTheme, getOpenCodeTheme, parseTheme, resolveTheme } from "../src/theme"
+import { discoverThemes } from "../src/theme/discovery"
+import { configDirectories } from "../src/util/config-directories"
+import { terminalMode } from "../src/theme/system"
+import opencodeSource from "../src/theme/assets/opencode.json" with { type: "json" }
+import { resolveThemeDocument } from "@opencode/theme/tui"
+import type { ThemeV1Json } from "@opencode/theme/tui/v1"
 import { tmpdir } from "./fixture/fixture"
 
-test("addTheme writes into module theme store", () => {
-  const name = `plugin-theme-${Date.now()}`
-  expect(addTheme(name, DEFAULT_THEMES.opencode)).toBe(true)
-  expect(allThemes()[name]).toBeDefined()
+const opencodeV1 = opencodeSource as ThemeV1Json
+
+test("rejects unrecognized theme structures", () => {
+  expect(() => parseTheme({})).toThrow()
+  expect(() => parseTheme({ version: 3 })).toThrow("Invalid theme")
 })
 
-test("addTheme keeps first theme for duplicate names", () => {
-  const name = `plugin-theme-keep-${Date.now()}`
-  const one = structuredClone(DEFAULT_THEMES.opencode)
-  const two = structuredClone(DEFAULT_THEMES.opencode)
-  one.theme.primary = "#101010"
-  two.theme.primary = "#fefefe"
-
-  expect(addTheme(name, one)).toBe(true)
-  expect(addTheme(name, two)).toBe(false)
-  expect(allThemes()[name]!.theme.primary).toBe("#101010")
+test("registers opencode as a native V2 theme", () => {
+  expect(allThemes().opencode).toBe(getOpenCodeTheme())
+  expect(parseTheme(getOpenCodeTheme()).base).toBeDefined()
 })
 
-test("addTheme ignores entries without a theme object", () => {
-  const name = `plugin-theme-invalid-${Date.now()}`
-  expect(addTheme(name, { defs: { a: "#ffffff" } })).toBe(false)
-  expect(allThemes()[name]).toBeUndefined()
+test("keeps the experimental opencode2 theme out of the global theme list", () => {
+  expect(allThemes().opencode2).toBeUndefined()
+  expect(hasTheme("opencode2")).toBe(false)
+})
+
+test("detects V1 themes from their theme field and caches migrations", () => {
+  const unversioned = structuredClone(opencodeV1)
+  const explicit = { ...structuredClone(opencodeV1), version: 1 }
+  const first = parseTheme(unversioned, "unversioned")
+  const second = parseTheme(explicit, "explicit")
+
+  expect(first.base).toBeDefined()
+  expect(second.base).toBeDefined()
+  expect(parseTheme(unversioned, "unversioned")).toBe(first)
+  expect(parseTheme(explicit, "explicit")).toBe(second)
+})
+
+test("decodes native V2 themes lazily once", () => {
+  const source = {
+    base: getOpenCodeTheme().base,
+    light: { ...getOpenCodeTheme().light, categorical: ["red"] },
+  } as const
+
+  const document = parseTheme(source)
+  expect(document.light?.categorical).toEqual(["red"])
+  expect(parseTheme(source)).toBe(document)
+})
+
+test("rejects invalid V2 themes when parsing", () => {
+  expect(() => parseTheme({ light: { categorical: [] } }, "invalid-v2")).toThrow(
+    "Invalid theme: invalid-v2",
+  )
+})
+
+test("rejects invalid V1 themes when parsing", () => {
+  const source = structuredClone(opencodeV1)
+  source.defs = { ...source.defs, one: "two", two: "one" }
+  source.theme.primary = "one"
+
+  expect(() => parseTheme(source)).toThrow("Circular color reference")
+})
+
+test("replacement sources receive independent parse caches", () => {
+  const first = structuredClone(opencodeV1)
+  const second = structuredClone(opencodeV1)
+  second.theme.primary = "#123456"
+
+  const previous = parseTheme(first)
+  const next = parseTheme(second)
+  expect(next).not.toBe(previous)
+  expect(parseTheme(second)).toBe(next)
 })
 
 test("hasTheme checks theme presence", () => {
-  const name = `plugin-theme-has-${Date.now()}`
-  expect(hasTheme(name)).toBe(false)
-  expect(addTheme(name, DEFAULT_THEMES.opencode)).toBe(true)
-  expect(hasTheme(name)).toBe(true)
+  expect(hasTheme("missing-theme")).toBe(false)
+  expect(hasTheme("opencode")).toBe(true)
 })
 
 test("resolveTheme rejects circular color refs", () => {
-  const item = structuredClone(DEFAULT_THEMES.opencode)
+  const item = structuredClone(opencodeV1)
   item.defs = { ...item.defs, one: "two", two: "one" }
   item.theme.primary = "one"
   expect(() => resolveTheme(item, "dark")).toThrow("Circular color reference")
 })
 
-// UT-T1 (FR-1/FR-3, план §11): опциональные ключи декораций диффа резолвятся без
-// override — фоллбэки backgroundElement и tint(accent).
-test("resolveTheme falls back for diff decoration keys (UT-T1)", () => {
-  const item = structuredClone(DEFAULT_THEMES.opencode)
-  const resolved = resolveTheme(item, "dark")
-  expect(resolved.diffCursorLineBg).toBeDefined()
-  expect(resolved.diffAnnotationMarkBg).toBeDefined()
-  expect(resolved.diffCursorLineBg).toEqual(resolved.backgroundElement)
-  expect(resolved.diffAnnotationMarkBg).not.toEqual(resolved.backgroundElement)
+test("resolveTheme preserves full theme numeric color and marker semantics", () => {
+  const item = structuredClone(opencodeV1)
+  item.theme.primary = 6
+  delete item.theme.selectedListItemText
+
+  const theme = resolveTheme(item, "dark")
+  expect(theme.primary.intent).toBe("rgb")
+  expect(theme.selectedListItemText).toBe(theme.background)
+  expect(theme._hasSelectedListItemText).toBe(false)
+})
+
+test("resolveTheme falls back for diff decoration keys in both modes", () => {
+  for (const mode of ["dark", "light"] as const) {
+    const item = structuredClone(opencodeV1)
+    const resolved = resolveTheme(item, mode)
+    expect(resolved.diffCursorLineBg).toEqual(resolved.backgroundElement)
+    expect(resolved.diffAnnotationMarkBg).not.toEqual(resolved.backgroundElement)
+  }
 })
 
 test("resolveTheme honors explicit diff decoration overrides", () => {
-  const item = structuredClone(DEFAULT_THEMES.opencode)
+  const item = structuredClone(opencodeV1)
   item.theme.diffCursorLineBg = "#123456"
   item.theme.diffAnnotationMarkBg = "#654321"
   const resolved = resolveTheme(item, "dark")
   expect(resolved.diffCursorLineBg).toEqual(RGBA.fromHex("#123456"))
   expect(resolved.diffAnnotationMarkBg).toEqual(RGBA.fromHex("#654321"))
+})
+
+test("resolved V2 themes expose diff decoration keys with fallbacks", () => {
+  const document = parseTheme(structuredClone(opencodeV1))
+  for (const mode of ["dark", "light"] as const) {
+    const resolved = resolveThemeDocument(document, mode)
+    expect(resolved.diff.cursorLine).toEqual(resolved.background.raised.high)
+    expect(resolved.diff.annotationMark).not.toEqual(resolved.background.base)
+    expect(resolved.diffCursorLineBg).toBe(resolved.diff.cursorLine)
+    expect(resolved.diffAnnotationMarkBg).toBe(resolved.diff.annotationMark)
+  }
+})
+
+test("V1 migration preserves explicit diff decoration keys", () => {
+  const item = structuredClone(opencodeV1)
+  item.theme.diffCursorLineBg = "#123456"
+  item.theme.diffAnnotationMarkBg = "#654321"
+  const resolved = resolveThemeDocument(parseTheme(item), "dark")
+  expect(resolved.diff.cursorLine).toEqual(RGBA.fromHex("#123456"))
+  expect(resolved.diff.annotationMark).toEqual(RGBA.fromHex("#654321"))
+})
+
+test("native V2 themes honor explicit diff decoration overrides", () => {
+  const theme = getOpenCodeTheme()
+  const source = {
+    base: {
+      ...structuredClone(theme.base),
+      diff: { ...structuredClone(theme.base.diff), cursorLine: "#123456", annotationMark: "#654321" },
+    },
+    light: structuredClone(theme.light),
+  }
+  const resolved = resolveThemeDocument(parseTheme(source), "light")
+  expect(resolved.diff.cursorLine).toEqual(RGBA.fromHex("#123456"))
+  expect(resolved.diff.annotationMark).toEqual(RGBA.fromHex("#654321"))
 })
 
 function terminalColors(defaultBackground: string | null, palette: Array<string | null> = []): TerminalColors {
@@ -99,4 +186,19 @@ test("custom theme precedence follows directory order", async () => {
   await writeFile(path.join(project, "themes", "custom.json"), JSON.stringify({ source: "project" }))
 
   await expect(discoverThemes([global, project])).resolves.toEqual({ custom: { source: "project" } })
+})
+
+test("theme directories include global config before project directories", async () => {
+  await using tmp = await tmpdir()
+  const global = path.join(tmp.path, "global")
+  const project = path.join(tmp.path, "repo", "package")
+  await mkdir(path.join(global, "themes"), { recursive: true })
+  await mkdir(path.join(project, ".opencode", "themes"), { recursive: true })
+  await writeFile(path.join(global, "themes", "global.json"), JSON.stringify({ source: "global" }))
+  await writeFile(path.join(project, ".opencode", "themes", "project.json"), JSON.stringify({ source: "project" }))
+
+  await expect(discoverThemes(configDirectories(global, project))).resolves.toEqual({
+    global: { source: "global" },
+    project: { source: "project" },
+  })
 })

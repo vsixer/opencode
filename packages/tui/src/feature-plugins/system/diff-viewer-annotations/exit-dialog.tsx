@@ -1,8 +1,8 @@
 /** @jsxImportSource @opentui/solid */
 import { TextAttributes } from "@opentui/core"
 import { createMemo, createSignal } from "solid-js"
-import type { TuiPluginApi } from "@opencode-ai/plugin/tui"
-import { useBindings } from "../../../keymap"
+import type { DiffAnnotationsApi } from "./api"
+import { useBindings } from "@opentui/keymap/solid"
 
 type ExitOption = {
   readonly key: "send" | "save" | "discard" | "cancel"
@@ -20,7 +20,7 @@ type ExitOption = {
 // Состояний ожидания/ошибки отправки нет: отправка fire-and-forget закрывает viewer
 // немедленно (FR-5), классификация сбоя живёт вне диалога.
 export function ExitDialog(props: {
-  api: TuiPluginApi
+  api: DiffAnnotationsApi
   count: () => number
   canSend: () => boolean
   sessionless: () => boolean
@@ -29,7 +29,7 @@ export function ExitDialog(props: {
   onDiscard: () => void
   onCancel: () => void
 }) {
-  const theme = () => props.api.theme.current
+  const theme = () => props.api.theme
 
   const options = createMemo<readonly ExitOption[]>(() => [
     {
@@ -96,12 +96,12 @@ export function ExitDialog(props: {
       width="60%"
       height={14}
       border
-      backgroundColor={theme().backgroundPanel}
-      borderColor={theme().borderActive}
+      backgroundColor={theme().background.raised.high}
+      borderColor={theme().border.base}
       flexDirection="column"
       gap={1}
     >
-      <text fg={theme().text} attributes={TextAttributes.BOLD}>
+      <text fg={theme().text.base} attributes={TextAttributes.BOLD}>
         Замечаний в черновике: {props.count()}
       </text>
       {options().map((option, index) => (
@@ -111,22 +111,22 @@ export function ExitDialog(props: {
             width={20}
             fg={
               option.disabled
-                ? theme().textMuted
+                ? theme().text.muted
                 : option.danger
-                  ? theme().error
+                  ? theme().text.feedback.error.base
                   : selected() === index
-                    ? theme().accent
-                    : theme().text
+                    ? theme().text.action.primary.base
+                    : theme().text.base
             }
           >
             {`${selected() === index ? "› " : "  "}${option.label}${option.disabled ? " (недоступно)" : ""}`}
           </text>
-          <text wrapMode="none" fg={theme().textMuted}>
+          <text wrapMode="none" fg={theme().text.muted}>
             — {option.hint}
           </text>
         </box>
       ))}
-      <text fg={theme().textMuted}>j/k · tab · enter — выбрать · esc — отмена</text>
+      <text fg={theme().text.muted}>j/k · tab · enter — выбрать · esc — отмена</text>
     </box>
   )
 }
