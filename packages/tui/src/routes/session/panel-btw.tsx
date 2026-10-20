@@ -366,6 +366,7 @@ export function BtwPanel(props: { parentID: string; width: number }) {
 
   return (
     <box
+      id="btw-panel"
       width={props.width}
       flexShrink={0}
       flexDirection="column"

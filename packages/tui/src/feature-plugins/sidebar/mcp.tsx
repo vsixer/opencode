@@ -3,7 +3,7 @@ import { createMemo, For, Match, Show, Switch } from "solid-js"
 import { DialogMcp } from "../../component/dialog-mcp"
 
 export function SidebarMcp(props: { context: Plugin.Context; sessionID: string }) {
-  const [view, updateView] = props.context.storage.store("view", { initial: { open: true } })
+  const [view, updateView] = props.context.storage.store("view", { initial: { open: false } })
   const theme = props.context.theme
   const session = createMemo(() => props.context.data.session.get(props.sessionID))
   const list = createMemo(() => props.context.data.location.mcp.server.list(session()?.location) ?? [])
@@ -27,15 +27,12 @@ export function SidebarMcp(props: { context: Plugin.Context; sessionID: string }
           flexDirection="row"
           gap={1}
           onMouseDown={() => {
-            if (list().length <= 2) return
             void updateView((draft) => {
               draft.open = !draft.open
             }).catch((error) => console.error("Failed to persist MCP sidebar state", error))
           }}
         >
-          <Show when={list().length > 2}>
-            <text fg={theme.text.base}>{view.open ? "▼" : "▶"}</text>
-          </Show>
+          <text fg={theme.text.base}>{view.open ? "▼" : "▶"}</text>
           <text fg={theme.text.base}>
             <b>MCP</b>
             <Show when={!view.open}>
@@ -46,7 +43,7 @@ export function SidebarMcp(props: { context: Plugin.Context; sessionID: string }
             </Show>
           </text>
         </box>
-        <Show when={list().length <= 2 || view.open}>
+        <Show when={view.open}>
           <For each={list()}>
             {(item) => (
               <box

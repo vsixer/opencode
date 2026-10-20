@@ -263,7 +263,14 @@ export function Session(props: {
   // на ещё не инициализированный const даёт TDZ «Cannot access X before initialization».
   const btw = useBtw()
   const btwActiveHere = createMemo(() => btw.state()?.parentID === route.sessionID)
-  const btwWidth = createMemo(() => (btwActiveHere() ? Math.floor(dimensions().width / 2) : 0))
+  const btwWidth = createMemo(() => {
+    if (!btwActiveHere()) return 0
+    // Половина реальной ширины строки сессии (transcript уже исключает вертикальные
+    // табы и сайдбар): панель встаёт встык к основной колонке, а не отрезает себе
+    // столбцы сайдбара от полной ширины терминала.
+    const available = props.width ?? dimensions().width - props.verticalTabsWidth
+    return Math.floor(Math.max(0, available) / 2)
+  })
   const contentWidth = createMemo(
     () => (props.width ?? dimensions().width - props.verticalTabsWidth) - 4 - btwWidth(),
   )
@@ -1395,7 +1402,10 @@ export function Session(props: {
     >
       <box flexDirection="row" flexGrow={1} minHeight={0}>
         <box
+          id="session-content"
           flexGrow={1}
+          flexShrink={1}
+          minWidth={0}
           minHeight={0}
           paddingBottom={1}
           paddingLeft={dimensions().width < 44 ? 1 : 2}
