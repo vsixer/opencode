@@ -1,13 +1,14 @@
 # BTW — боковая панель (ephemeral side-chat)
 
 **Status:** stable
-**Дата:** 2026-08-07
-**Branch:** `btw-side-panel`
+**Дата:** 2026-10-20
+**Branch:** `dev` (панель сохранена и портирована в V2-мёрerdже `070e437102`; историческая ветка `btw-side-panel`)
 **Связанные:** —
+**Upstream:** у upstream есть собственный one-shot `/btw` (`session.aside`) — форкская панель его не заменяет, а сосуществует (см. «Расхождение с upstream»)
 
 ## TL;DR
 
-`/btw` открывает эфемерный side-chat в **боковой панели справа** (рабочая область делится 50/50 по горизонтали), а не в блокирующей модалке. Основная сессия остаётся полностью интерактивной — можно работать в двух сессиях одновременно: слева основная, справа эфемерная. Side-chat заморожен на контексте текущей сессии и живёт в памяти сервера (in-memory, без персистенции).
+`/btw` открывает эфемерный side-chat в **боковой панели справа** (рабочая область делится 50/50 по горизонтали), а не в блокирующей модалке. Основная сессия остаётся полностью интерактивной — можно работать в двух сессиях одновременно: слева основная, справа эфемерная. Side-chat заморожен на контексте текущей сессии и живёт в памяти сервера (in-memory, без персистенции). После V2-мёрerdжа SSE-транспорт идёт через новый V2-клиент (`client.api.btw.*`, пути `/api/btw/*`).
 
 ## Мотивация
 
@@ -20,115 +21,116 @@
 ### Раскладка
 
 - Панель рендерится сиблингом основного контента в `routes/session/index.tsx`: `[основная | btw]`.
-- Ширина панели — `floor(terminal_width / 2)`, основная занимает остаток. Раскладка ровно 50/50.
-- Правый sidebar (список сессий, ~42 колонки) **скрывается**, пока btw открыта — `sidebarVisible` возвращает `false` при `btwActiveHere`.
-- `contentWidth` (контекст переноса сообщений) пересчитывается с учётом ширины панели.
+- Ширина панели — половина рабочей области (50/50), `contentWidth` (контекст переноса сообщений) пересчитывается с учётом ширины панели.
+- Панель монтируется внутри layout-примитивов upstream (правая половина split'а).
 
 ### Клавиши
 
 | Keybind | Команда | Действие |
 |---|---|---|
-| `<leader>b` (`session_btw`) | `session.btw` | **Cycle фокуса**: закрыто → открыть+фокус на btw; btw в фокусе → фокус на основную; основная в фокусе → фокус на btw |
-| `<leader>p` (`session_btw_close`) | `session.btw.close` | Закрыть панель (фокус возвращается в основную) |
+| `<leader>b` (`session.btw`) | `session.btw` | **Cycle фокуса**: закрыто → открыть+фокус на btw; btw в фокусе → фокус на основную; основная в фокусе → фокус на btw |
+| `<leader>p` (`session.btw.close`) | `session.btw.close` | Закрыть панель (фокус возвращается в основную) |
 | та же клавиша, что `session.interrupt` в `tui.jsonc` | (локальный биндинг панели) | Прервать ход btw (только когда поле btw в фокусе) |
-| `/btw` (slash) | `session.btw` | То же, что `<leader>b` |
+| `/btw` (slash) | `session.btw` | То же, что `<leader>b`. Slash владеет **форкская панель**; upstream-команда `session.aside` осталась palette-only |
 
-Обе клиши и slash входят в `sessionBindingCommands` и активны только на роуте сессии.
+После V2-мёрerdжа id команд и биндингов — dot-неймспейс upstream (`session.btw`, `session.btw.close`); `session.sidebar.toggle` перенесён на `<leader>v`, чтобы освободить `<leader>b` под btw.
 
 ### Управление фокусом
 
 Главная техническая проблема — `component/prompt/index.tsx` имеет автофокус-эффект, который забирает фокус, когда `visible && dialog.stack.length === 0`. Панель btw — не диалог, поэтому этот эффект непрерывно крал бы фокус у поля btw.
 
-Решение — новый prop `yieldFocus?: boolean` на `<Prompt>`:
-- `yieldFocus={btwActiveHere()}` пока панель открыта.
-- Эффект автофокуса в этом режиме **не грэббит** фокус сам, но и **не blur'ит** поле, если оно получено явно (цикл фокуса / клик). Так обе панели сосуществуют без гонки.
+Решение — prop `yieldFocus?: boolean` на `<Prompt>`:
+- `yieldFocus` выставлен, пока панель открыта.
+- Эффект автофокуса в этом режиме **не грэббит** фокус сам (`input.focusable = true` выполняется до early-return), но и **не blur'ит** поле, если оно получено явно (цикл фокуса / клик). Так обе панели сосуществуют без гонки.
 
 Команда cycle переключает фокус через ref'ы: `promptRef.current.focus()` ↔ `btw.ref().focus()`, а решение «кого фокусить» принимает по `btw.ref().focused()`.
 
 ### Thinking-блоки (сворачиваемые)
 
 - Каждый reasoning-блок по умолчанию **свёрнут** в однострочный маркер: `▸ thinking (1234 chars)`.
-- Клик по маркеру разворачивает: `▾ thinking` + полный текст через `<code filetype="markdown" syntaxStyle={subtleSyntax()}>`.
+- Клик по маркеру разворачивает: `▾ thinking` + полный текст через `<code filetype="markdown" syntaxStyle={…subtle…}>`.
 - Состояние хранится в `expandedThinking: Set<messageId>` — независимо для каждого блока.
-- Защита от срабатывания при выделении текста: `if (renderer.getSelection()?.getSelectedText()) return`.
-- Развёрнутый reasoning рендерится с приглушённой (subtle) подсветкой, как `ReasoningPart` основной сессии.
+- Защита от срабатывания при выделении текста: проверка `renderer.getSelection()`.
+- Развёрнутый reasoning рендерится с приглушённой (subtle) подсветкой, как reasoning основной сессии.
 
 ### Индикатор выполнения запроса
 
-Истинный прогресс LLM-стрима (проценты) недоступен, поэтому индикатор — **таймер идущего тура**:
-- В шапке справа при `busy` появляется `⟳ Ns` (цвет `theme.primary`) — секунды с момента старта хода. Видно всегда, даже если прокрутили сообщения вверх.
-- Спинсер у хвоста сообщений тоже показывает elapsed: `thinking… 3s`.
-- `createEffect` на `busy()` тикает раз в секунду, чистится через `onCleanup`.
-- Тот же приём зеркалится в **основную сессию**: `AssistantMessage` в `packages/tui/src/routes/session/index.tsx` ведёт локальный секундный тикер, пока у сообщения не установлен `time.completed`, и показывает `· Ns` в футере сообщения рядом с моделью (`now() - user.time.created`). После завершения значение фиксируется по `time.completed`; промежуточные tool-call-сообщения время не показывают. На время ожидающего вопроса агента таймер **замораживается**: длительность паузы накапливается и вычитается из elapsed, поэтому ожидание ответа не учитывается ни в живом значении, ни в финальном. Пауза — **общая для всего хода** (ключ — id user-сообщения, общий `parentID` всех assistant-сообщений хода), хранится на уровне модуля и наполняется эффектом в `Session`; это принципиально, т.к. ход дробится на отдельные assistant-сообщения при каждом tool-call, и покомпонентная пауза терялась при появлении нового сообщения (наблюдался скачок таймера на полный wall-clock). На время вопроса `now()` и накопленная пауза растут синхронно, поэтому отображаемое значение «замёрзло», а после ответа пауза вычитается бесшовно — без скачка.
+Истинный прогресс LLM-стрима (проценты) недоступен, поэтому индикатор — **таймер идущего тура**: `⟳ Ns` в шапке при `busy` и elapsed у спинсера хвоста сообщений. Живой секундный тикер есть и в **основной сессии** (футер assistant-сообщения, `· Ns` рядом с моделью): на время ожидающего вопроса агента таймер замораживается — пауза общая для всего хода, накапливается и вычитается из elapsed, поэтому ожидание ответа не учитывается ни в живом значении, ни в финальном.
 
 ### Подсветка синтаксиса (как в основной сессии)
 
-- **Ассистент-текст** — `<markdown syntaxStyle={syntax()} filetype="markdown" streaming internalBlockMode="top-level" tableOptions={{style:"grid"}} fg={theme.markdownText}>`. Код-блоки ```` ```lang ````, списки, заголовки, таблицы — с подсветкой tree-sitter, переносятся по ширине панели.
-- **Reasoning (развёрнутый)** — `<code filetype="markdown" syntaxStyle={subtleSyntax()}>` (приглушённо).
-- **User-текст** — plain `<text>` (совпадает с основной сессией, там user-сообщения тоже без markdown).
+- **Ассистент-текст** — `<markdown>` со stream-рендерингом и tree-sitter подсветкой код-блоков, переносится по ширине панели.
+- **Reasoning (развёрнутый)** — приглушённый `<code filetype="markdown">`.
+- **User-текст** — plain `<text>` (совпадает с основной сессией).
 - Роль помечена коротким дим-лейблом `btw` над markdown-блоком.
 
 ### Прерывание хода
 
-Биндинг прерывания **зеркалит** клавишу `session.interrupt` из конфига пользователя (уважает ремап из `tui.jsonc`), а не хардкодит escape:
-- `tuiConfig.keybinds.get("session.interrupt")` → resolved `Binding[]` → повторно регистрируется с `cmd: abortTurn` и `fallthrough: true`.
-- `fallthrough: true` гарантирует, что когда btw не в фокусе, клавиша проходит далее к `session.interrupt` основной сессии — две панели не глушат interrupt друг друга.
-- `cmd` проверяет `renderer.currentFocusedEditor === textarea` — срабатывает только когда поле btw в фокусе.
-- Двухканальный обрыв: локальный `AbortController` рвёт fetch немедленно, серверный `/btw/abort` надёжен при half-open SSE.
-- Таймауты: hard 60s (полностью глухое зависание), inactivity 30s (нет чанков).
+Биндинг прерывания **зеркалит** клавишу `session.interrupt` из конфига пользователя (`config.data.keybinds.get("session.interrupt")`), а не хардкодит escape:
+- повторно регистрируется с `cmd: abortTurn` и `fallthrough: true`;
+- `fallthrough: true` гарантирует, что когда btw не в фокусе, клавиша проходит далее к `session.interrupt` основной сессии — две панели не глушат interrupt друг друга;
+- `cmd` срабатывает только когда поле btw в фокусе;
+- двухканальный обрыв: локальный `AbortSignal` рвёт SSE-стрим клиента немедленно, серверный `btw.abort` надёжен при half-open SSE.
 
 ### Изоляция панелей
 
 Основная панель и btw **независимы в обоих направлениях**: открытие btw не влияет на маршрут, отображение и сохранение ответов основной сессии, и наоборот.
 
-- **Заморозка снимка.** `Btw.open` срезает контекст родителя по последний **завершённый** ход (`freezeSnapshot` в `session/btw/snapshot.ts`): незавершённый ход — висящий вопрос без ответа или частичный ответ — в снимок не попадает. Иначе модель btw продолжает родительскую задачу, и её «ответ» печатается в btw-панели, теряясь для основной.
-- **Инструкция side-chat.** В системный промпт btw добавляется явный запрет продолжать/возобновлять родительскую задачу (`SIDE_CHAT_INSTRUCTION`).
-- **Владение кадрами.** Каждый кадр SSE-стрима btw несёт `btwID` (сервер проставляет во все `BtwPart`); панель отбрасывает кадры с чужим `btwID` — смешение разговоров невозможно даже при ошибке доставки. Требование поля схемой — компиляционная гарантия: новый эмиттер без `btwID` не скомпилируется.
-- **Стриминговый транспорт.** В worker-режиме TUI SSE-ответы больше не буферизуются целиком (`await response.text()`): `/btw/send` стримится rpc-событиями `fetch.start/chunk/end/error` по мере генерации, а `AbortSignal` клиента доходит до сервера через `rpc.fetchAbort`. Затронуты `cli/cmd/tui.ts` (клиентская сборка `Response` из событий) и `cli/tui/worker.ts` (серверная перекачка кадров).
-- **Гонка закрытия.** Если панель размонтировалась до ответа `/btw/open`, полученный «поздний» `btwID` закрывается на сервере — беседа не остаётся висеть в памяти.
+- **Заморозка снимка.** `SessionBtw.open` срезает контекст родителя по последний **завершённый** ход (`freezeSnapshot` в `packages/core/src/session/btw/snapshot.ts`): незавершённый ход — висящий вопрос без ответа или частичный ответ — в снимок не попадает. Иначе модель btw продолжает родительскую задачу, и её «ответ» печатается в btw-панели, теряясь для основной.
+- **Инструкция side-chat.** В системный промпт btw добавлен явный запрет продолжать/возобновлять родительскую задачу (`SIDE_CHAT_INSTRUCTION`, теперь также запрещает tool-calls — btw не исполняет тулы, как и upstream-`session.generate`).
+- **Владение кадрами.** Каждый кадр SSE-стрима btw несёт `btwID` (сервер проставляет во все `BtwPart`); панель отбрасывает кадры с чужим `btwID` — смешение разговоров невозможно даже при ошибке доставки. Требование поля схемой — компиляционная гарантия.
+- **Стриминговый транспорт (V2).** После V2-мёрerdжа SSE идёт через transport нового клиента: `client.api.btw.send(...)` возвращает `AsyncIterable<Btw.Part>` — кадры обрабатываются по мере генерации, `AbortSignal` передаётся в запрос. Старый worker-rpc (`fetch.start/chunk/end`) не существует — его заменил нативный стриминг клиентского транспорта.
+- **Гонка закрытия.** Если панель размонтировалась до ответа `btw.open`, полученный «поздний» `btwID` закрывается на сервере — беседа не остаётся висеть в памяти.
 
 ### Жизненный цикл
 
-- **In-memory, без персистенции.** При открытии панель вызывает `btw.open({parentID})` → сервер создаёт новый `btwID`. История живёт только в памяти.
-- **Сброс при навигации.** Эффект в `app.tsx` (`createEffect(on(() => route.sessionID, () => btw.close()))`) закрывает btw при смене сессии — панель не «всплывает» пустой при возврате на старую сессию. Этот эффект живёт в здоровом owner'е (App), а не в disposal-цикле Session.
-- **Закрытие** (`<leader>p` или navigate) → `btw.close()` → `BtwPanel` unmount'ится → `onCleanup` вызывает `btw.close({btwID})` на сервере.
+- **In-memory, без персистенции.** При открытии панель вызывает `client.api.btw.open({ parentID })` → сервер создаёт новый `btwID`. История живёт только в памяти.
+- **Сброс при навигации.** Эффект в `app.tsx` (`createEffect(on(() => route.data.sessionID, () => btw.close()))`) закрывает btw при смене сессии. Эффект живёт в здоровом owner'е (App), а не в disposal-цикле Session — запись ancestor-сигнала в `onCleanup` дочернего owner'а рвёт реактивную очередь Solid.
+- **Закрытие** (`<leader>p` или navigate) → `btw.close()` → `BtwPanel` unmount'ится → `onCleanup` вызывает `client.api.btw.close({ btwID })`.
+- **Ошибка выбора модели.** Если родительская сессия не дала модель/агента — доменная ошибка `Btw.SelectionError` превращается хендлером в HTTP 400 (`InvalidRequestError`), панель показывает её как обычную ошибку хода.
 
 ## Расхождение с upstream
 
-btw — **полностью fork-фича**, в `anomalyco/opencode` её нет. Вся серверная часть и TUI добавлены форком.
+До V2-мёрerdжа btw была **полностью fork-фичей**. К синку 2026-10-20 upstream независимо добавил собственный btw: плагин `packages/tui/src/feature-plugins/prompt/btw.tsx` — **one-shot диалог** `session.aside` (slash `/btw`) поверх `session.generate`: вопрос уходит одним запросом, ответ показывается в модалке, без стриминга в постоянную панель.
 
-| Upstream | Fork |
-|---|---|
-| Нет команды `/btw`, нет side-chat. | Команда `/btw`, серверный ephemeral side-chat (`session/btw/`) + TUI-панель. |
-| — | Первая реализация была модалкой (`dialog-btw.tsx`, коммит `9be9fc157`); переделана в боковую панель (коммит `2d95f4c1f`). |
-| `<Prompt>` без `yieldFocus`; автофокус безусловный. | Добавлен prop `yieldFocus` — автофокус уступает, пока открыта боковая панель. |
-| `ui/dialog.tsx` без btw-специфики. | (Форк ранее добавлял `setOnEscape`/`onEscape` под btw-модалку; после перехода на панель этот btw-only код удалён, `dialog.tsx` возвращён к чистому виду.) |
+Решение по синку: **форкская панель сохранена и портирована**, upstream-плагин оставлен palette-only.
+
+| | Upstream `session.aside` | Форкская панель `session.btw` |
+|---|---|---|
+| UI | центрированный one-shot диалог | постоянная боковая панель 50/50 |
+| Ответ | single-shot, `session.generate` без tool-цикла | стриминг хода (текст + reasoning), multi-turn в рамках открытой беседы |
+| Основная сессия | заблокирована модалкой | полностью интерактивна |
+| История | теряется при закрытии диалога | живёт, пока открыта панель (in-memory на сервере) |
+| Slash `/btw` | убран (palette-only) | принадлежит панели |
+| Транспорт | `session.generate` | `btw.open/send/close/abort` (SSE `Btw.Part`) |
+
+Ограничение, общее с upstream: **btw не исполняет тулы** — инструкция side-chat запрещает tool-calls, кадр `tool` в схеме сохранён для совместимости с панелью.
 
 ### Конфликтная поверхность (upstream-owned файлы, которых касается фича)
 
-Это файлы под `packages/` (upstream-owned) — основной конфликт-поверхностью при `git merge upstream/dev`:
-
 | Файл | Изменение |
 |---|---|
-| `packages/tui/src/app.tsx` | + обёртка `BtwProvider`; переписана команда `session.btw` (cycle); добавлена `session.btw.close`; эффект закрытия btw при смене сессии. |
-| `packages/tui/src/routes/session/index.tsx` | + `useBtw()`, memos `btwActiveHere`/`btwWidth`, override `sidebarVisible`, `contentWidth` учитывает панель, рендер `<BtwPanel/>`, `<Prompt yieldFocus={btwActiveHere()}/>`, `"session.btw.close"` в `sessionBindingCommands`; + живой таймер elapsed хода в футере `AssistantMessage`. |
-| `packages/tui/src/component/prompt/index.tsx` | + prop `yieldFocus` + ветка в автофокус-эффекте. |
-| `packages/tui/src/config/keybind.ts` | + `session_btw_close: <leader>p` + `CommandMap.session_btw_close`. |
-| `packages/tui/src/ui/dialog.tsx` | удалён btw-only `setOnEscape`/`onEscape` (чистка после ухода от модалки). |
-| `packages/opencode/src/cli/cmd/tui.ts` | `createWorkerFetch`: SSE-ответы собираются из rpc-событий (`fetch.start/chunk/end/error`), `init.signal` → `rpc.fetchAbort`; не-SSE — буферизованно как раньше. |
-| `packages/opencode/src/cli/tui/worker.ts` | `rpc.fetch`: стриминг SSE-ответов в TUI rpc-событиями вместо полной буферизации `response.text()`; сигнал прерывания в `Request`; + `rpc.fetchAbort`. |
+| `packages/tui/src/app.tsx` | + команды `session.btw` (cycle, slash `/btw`) и `session.btw.close`; `BtwProvider`; эффект закрытия btw при смене сессии. |
+| `packages/tui/src/config/keybind.ts` | + `session.btw` (`<leader>b`), `session.btw.close` (`<leader>p`); `session.sidebar.toggle` → `<leader>v`. |
+| `packages/tui/src/component/prompt/index.tsx` | + prop `yieldFocus` + ветка в автофокус-эффекте (после `input.focusable = true`). |
+| `packages/tui/src/feature-plugins/prompt/btw.tsx` | убран `slash` у upstream-команды `session.aside` (анти-дубль `/btw`). |
+| `packages/tui/src/routes/session/index.tsx` | + монтаж `<BtwPanel/>` (правая половина split), фокус-цикл. |
+| `packages/protocol/src/api.ts`, `packages/protocol/src/client.ts` | + группа `server.btw` в composition API и codegen-имена. |
+| `packages/server/src/handlers.ts` | + `BtwHandler` в `Layer.mergeAll`. |
+| `packages/client/src/promise/generated/*`, `packages/client/src/effect/generated/*` | **regenerated** (`bun run generate` из `packages/client`) — группа `btw` c методами `open/send/close/abort`. |
 
-### Fork-owned файлы (новые)
+### Fork-owned файлы
 
 | Файл | Назначение |
 |---|---|
+| `packages/schema/src/btw.ts` | Схемы SSE-кадров `Btw.Part` (11 фреймов: `ready`, `user`, `text-delta`, `reasoning-delta`, `text-end`, `tool`, `assistant-end`, `turn-end`, `error`, `warning`, `closed`) + `Btw.End`; каждый кадр несёт `btwID`. |
+| `packages/core/src/session/btw.ts` | `SessionBtw`: `open` (замороженный LLM-запрос: система + снимок истории родителя), `runSend` (многоходовый process-local транскрипт, гонка прерываний, дренаж очереди), `close`/`abort`/`dispose`, доменная ошибка `SelectionError`. |
+| `packages/core/src/session/btw/snapshot.ts` | `freezeSnapshot` (срез по последний завершённый ход родителя) + `SIDE_CHAT_INSTRUCTION`. |
+| `packages/protocol/src/groups/btw.ts` | HttpApi-группа `server.btw`: `POST /api/btw/open`, `GET /api/btw/send` (SSE `Btw.Part`), `POST /api/btw/close`, `POST /api/btw/abort`. |
+| `packages/server/src/handlers/btw.ts` | `BtwHandler`: open резолвит родителя через location-миддлвари; send — неограниченная очередь + `HttpServerResponse.stream`; `SelectionError` → 400. |
+| `packages/core/test/session-btw.test.ts`, `session-btw-snapshot.test.ts` | Инварианты дренажа/прерывания и тесты заморозки снимка. |
 | `packages/tui/src/context/btw.tsx` | `BtwProvider`: `state()`/`open`/`close`, `ref()`/`setRef` для цикла фокуса. |
-| `packages/tui/src/routes/session/panel-btw.tsx` | `BtwPanel`: стрим/abort, проверка владения кадрами (`btwID`), рендер (markdown + подсветка, сворачиваемый thinking, индикатор хода, спинсер), ref поля ввода. |
-| `packages/opencode/src/session/btw/index.ts` | Сервер: HttpApi-группа `/btw` (`open`/`send`/`close`/`abort`), in-memory store keyed by `btwID`, заморозка контекста parent-сессии, штамп `btwID` на кадрах стрима. |
-| `packages/opencode/src/session/btw/schema.ts` | Серверные схемы (`BtwOpenRequest`, chunk'и стрима и т.д.); каждый кадр несёт `btwID`. |
-| `packages/opencode/src/session/btw/snapshot.ts` | `freezeSnapshot` (срез снимка по последний завершённый ход родителя) + `SIDE_CHAT_INSTRUCTION`. |
-
-`packages/tui/src/routes/session/dialog-btw.tsx` (бывшая модалка) удалён — логика перенесена в `panel-btw.tsx`.
+| `packages/tui/src/routes/session/panel-btw.tsx` | `BtwPanel`: стрим через `client.api.btw.*`, изоляция по `btwID`, рендер (markdown + подсветка, сворачиваемый thinking, индикатор хода), ref поля ввода. |
 
 ## Usage / Configuration
 
@@ -142,72 +144,66 @@ btw — **полностью fork-фича**, в `anomalyco/opencode` её не�
 
 ### Переназначение клавиш
 
-В `tui.jsonc` (секция `tui.keybinds`):
+В `tui.jsonc` (секция `tui.keybinds`, dot-неймспейс после V2-мёрerdжа):
 
 ```jsonc
 {
   "tui": {
     "keybinds": {
-      "session_btw": "<leader>b",        // открыть / цикл фокуса
-      "session_btw_close": "<leader>p",  // закрыть панель
-      "session_interrupt": "ctrl+x"      // ваш ремап interrupt автоматически применяется и к btw
+      "session.btw": "<leader>b",       // открыть / цикл фокуса
+      "session.btw.close": "<leader>p", // закрыть панель
+      "session.interrupt": "ctrl+x"     // ваш ремап interrupt автоматически применяется и к btw
     }
   }
 }
 ```
 
-Прерывание хода btw **не нужно настраивать отдельно** — оно зеркалирует `session_interrupt`. Любой ремап `session_interrupt` применяется к обеим панелям.
+Прерывание хода btw **не нужно настраивать отдельно** — оно зеркалирует `session.interrupt`. Любой ремап `session.interrupt` применяется к обеим панелям.
 
 ## Реализация
 
 ### Архитектура фокуса и состояния
 
 ```
-BtwProvider (context/btw.tsx, обёрнут вокруг DialogProvider в app.tsx)
+BtwProvider (packages/tui/src/context/btw.tsx, обёрнут вокруг DialogProvider в app.tsx)
   ├─ state(): { parentID } | undefined   // открыта ли панель и для какой сессии
   ├─ open(parentID) / close()
   └─ ref() / setRef()                    // BtwRef поля ввода панели
 
 app.tsx
-  ├─ session.btw (cycle):  open | ref.focus() | promptRef.focus()
+  ├─ session.btw (cycle):  open | ref.focus() | promptRef.focus()   (slash /btw)
   ├─ session.btw.close:    btw.close()
-  └─ createEffect(on(route.sessionID, () => btw.close()))   // сброс при навигации
+  └─ createEffect(on(sessionID, () => btw.close()))   // сброс при навигации
 
 routes/session/index.tsx
-  ├─ btwActiveHere = btw.state()?.parentID === route.sessionID
-  ├─ btwWidth = floor(width / 2)
-  ├─ sidebarVisible → false при btwActiveHere
-  ├─ <BtwPanel parentID width={btwWidth}/>  (Show)
-  └─ <Prompt yieldFocus={btwActiveHere()}/>
+  └─ <BtwPanel parentID …/> в правой половине split'а
 
 component/prompt/index.tsx
-  └─ createEffect: if (yieldFocus) return  // не грэббим фокус, пока панель открыта
+  └─ createEffect: input.focusable = true; if (yieldFocus) return
 ```
 
 ### Поток данных (стрим ответа)
 
 ```
-sdk.client.btw.send({btwID, text}, {signal: turnAbort})
-  → SSE: for await (chunk of resp.stream)
-      → if (chunk.btwID !== id) continue      // изоляция: чужие кадры отбрасываются
-      → handlePart(chunk, assistantId)
-          reason-delta → patchAssistant(reasoning += delta)
-          text-delta   → patchAssistant(text += delta)
-          tool         → patchAssistant(tools[…])
+client.api.btw.open({ parentID }) → { btwID }
+client.api.btw.send({ btwID, text }, { signal })   // GET /api/btw/send, SSE
+  → for await (part of stream)                     // AsyncIterable<Btw.Part>
+      → if (part.btwID !== id) continue            // изоляция: чужие кадры отбрасываются
+      → handlePart(part)
+          reasoning-delta → reasoning += delta
+          text-delta      → text += delta
+          tool            → индикатор tool-события
           turn-end|error|closed → break
-  finally → setBusy(false), cleanup timers
+finally → setBusy(false), cleanup timers
+client.api.btw.close({ btwID }) / client.api.btw.abort({ btwID })
 ```
 
-### Подводный камень: TDZ eager-memo
-
-`createMemo` в Solid выполняется **eagerly** (сразу при создании). В `routes/session/index.tsx` `btwActiveHere` ссылается на `btw` — поэтому `const btw = useBtw()` обязан быть объявлен **выше** этого мемо. Иначе eager-выполнение обращается к `btw` в TDZ → краш `Cannot access X before initialization` при перемонтировании Session (навигация). TypeScript это не ловит (ссылка внутри вложенной arrow-функции). Порядок: `wide → btw → btwActiveHere → btwWidth`.
-
-Ещё один анти-паттерн, которого сознательно избегаем: **запись ancestor-сигнала в `onCleanup` дочернего owner'а** (рвёт реактивную очередь Solid). Поэтому закрытие btw при навигации сделано эффектом в `App` (здоровый owner), а не `onCleanup` в `Session`.
+Подводный камень TDZ eager-memo из прежней реализации (порядок `btw` выше memos, ссылающихся на него) остаётся актуальным: `createMemo` в Solid выполняется eagerly, и обращение к `useBtw()` до объявления крашит перемонтирование Session.
 
 ## Open questions / future work
 
 - **Ширина как опция.** Сейчас жёстко 50/50. Можно вынести в настройку (фиксированная ширина / пропорция).
-- **Персистенция side-chat.** In-memory — история теряется при перезапуске сервера и при закрытии панели. Если понадобится сохранять, потребуется отдельный storage-дизайн.
-- **Независимый interrupt для btw.** Сейчас abort btw доступен только из поля btw (фокус-гейт). Добавить «прервать btw откуда угодно» — отдельный keybind или индикатор-кнопка в шапке.
-- **Code-блоки в узкой панели.** Подсветка переносится по ширине контейнера; очень широкие блоки могут быть тесны. Горизонтальный скролл внутри code-блока не реализован.
-- **Многоуровневый thinking.** Сейчас один уровень свёрнутости. Если появятся вложенные reasoning-секции — рассмотреть дерево.
+- **Персистенция side-chat.** In-memory — история теряется при перезапуске сервера и при закрытии панели.
+- **Независимый interrupt для btw.** Сейчас abort btw доступен только из поля btw (фокус-гейт).
+- **Tool-кадры.** Схема сохраняет фрейм `tool`, но btw не исполняет тулы; если появится потребность — это отдельный дизайн (upstream `session.generate` имеет то же ограничение).
+- **Сведение с upstream-плагином.** Следить за эволюцией upstream-`session.aside`: если upstream доведёт one-shot до полноценного чата, переоценить дублирование поверхностей.

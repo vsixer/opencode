@@ -6,6 +6,24 @@ Entries: newest first. Format: `YYYY-MM-DD — <feature>` with a link to `featur
 
 ---
 
+## 2026-10-20 — V2-мёрдж: docs refreshed for config-reload and btw-side-panel
+
+Документация двух фич приведена в соответствие с реализацией после синка
+upstream/dev (мёрдж `070e437102`). **config-reload**: форк перешёл на
+upstream-механизм (`LocationServiceMap.reload()` + реактивные config-плагины);
+собственный lifecycle (отложенный релод, TUI bootstrap-протокол,
+`ConfigLifecycleApi`, события `config.reload.*`) выпущен; сохранены slash
+`/reload` (upstream-команда `location.reload`) и тул `reload_config`
+(permission-гейт, `stopAfterToolResult`) поверх нового механизма.
+**btw-side-panel**: панель сохранена и портирована в V2-архитектуру — SSE через
+новый клиент (`client.api.btw.*`, пути `/api/btw/*`, кадры `Btw.Part` из
+`packages/schema/src/btw.ts`); upstream-плагин `session.aside` оставлен
+palette-only, slash `/btw` принадлежит форкской панели. Подробности:
+[features/config-reload.md](features/config-reload.md),
+[features/btw-side-panel.md](features/btw-side-panel.md).
+
+---
+
 ## 2026-10-08 — btw: изоляция панелей (snapshot cutoff, штампы btwID, стриминговый транспорт)
 
 BTW и основная панель теперь независимы в обоих направлениях. Снимок контекста

@@ -147,7 +147,9 @@ const pinnedSessionBindingCommands = [
   "session.quick_switch.9",
 ] as const
 
-const appBindingCommands = [
+// Command IDs whose user-configurable keybinds the app resolves in the global bindings layer.
+// A command id missing from this list ignores both its TuiKeybind default and any cli.json override.
+export const appBindingCommands = [
   "command.palette.show",
   "model.list",
   "model.cycle_recent",
@@ -182,6 +184,8 @@ const appBindingCommands = [
   "app.toggle.file_context",
   "app.toggle.diffwrap",
   "app.toggle.paste_summary",
+  "session.btw",
+  "session.btw.close",
 ] as const
 
 export type TuiInput = {
