@@ -208,6 +208,26 @@ export function FormPrompt(props: { form: FormWithLocation }) {
     return "confirm"
   })
 
+  // The form follows the user's global input keymap: text editing and the final
+  // review submit through commands named "input.submit", which the keymap layer
+  // resolves to the configured bindings verbatim (string lists, key-stroke
+  // objects, per-binding event options), while the focused textarea inserts
+  // newlines with the configured input.newline via the shared textarea keymap
+  // layer. Option selection keeps plain Enter because picking a ready answer is
+  // not text editing.
+  const shortcuts = Keymap.useShortcuts()
+  // Compact footer hint: the first stroke of the configured submit binding,
+  // displayed with the conventional enter naming. Undefined when input.submit
+  // is unbound (false/none) so the footer never advertises a dead key.
+  const submitHint = createMemo(() => {
+    if (!config.keybinds.has("input.submit")) return undefined
+    return shortcuts.get("input.submit")?.split(/[ ,]/)[0]?.replace("return", "enter")
+  })
+  // The footer advertises the key that fires the highlighted action: editing
+  // states and the review step submit with the configured keys, everything else
+  // (option pick, external link flow) stays on Enter.
+  const footerSubmitKey = createMemo(() => (confirm() || textual() || store.editing ? submitHint() : "enter"))
+
   onCleanup(() => {
     // A reply or cancel removes the form from data before this unmount runs, so a
     // form still listed here is only hidden by navigation and worth restoring.
@@ -447,6 +467,27 @@ export function FormPrompt(props: { form: FormWithLocation }) {
     if (!single()) selectTab((store.tab + direction + tabs()) % tabs())
   }
 
+  // Commits the textarea content of the current answer and moves the form
+  // forward: textual fields advance a tab, single-select replies immediately,
+  // multi-field forms walk to the next field. Shared by the keymap submit
+  // binding and the textarea's own submit callback.
+  function submitAnswerEdit() {
+    const text = textarea?.plainText?.trim() ?? ""
+    const current = answerField()
+    if (!current) return
+    if (textual()) {
+      submitInput(text)
+      return
+    }
+    const wasMulti = multi()
+    if (!commitInput(text) || wasMulti || !text) return
+    if (single()) {
+      replySingle(current, text)
+      return
+    }
+    selectTab(store.tab + 1)
+  }
+
   function selectTabFromMouse(target?: FormField) {
     const targetIndex = () => {
       const index = target ? fields().findIndex((field) => field === target) : fields().length
@@ -615,26 +656,15 @@ export function FormPrompt(props: { form: FormWithLocation }) {
           setStore("selected", store.selected - 1)
         },
       },
+      // No `bind` fallback: the command is keyless unless the user's config
+      // defines input.submit, in which case those exact bindings apply. The
+      // edit and review layers register the same name under mutually exclusive
+      // enabled conditions, so only one chain entry is ever active.
       {
-        bind: "return",
+        id: "input.submit",
         title: "Submit answer edit",
         group: "Form",
-        run: () => {
-          const text = textarea?.plainText?.trim() ?? ""
-          const current = answerField()
-          if (!current) return
-          if (textual()) {
-            submitInput(text)
-            return
-          }
-          const wasMulti = multi()
-          if (!commitInput(text) || wasMulti || !text) return
-          if (single()) {
-            replySingle(current, text)
-            return
-          }
-          selectTab(store.tab + 1)
-        },
+        run: submitAnswerEdit,
       },
     ],
   }))
@@ -699,7 +729,7 @@ export function FormPrompt(props: { form: FormWithLocation }) {
           : confirm()
             ? [
                 {
-                  bind: "return",
+                  id: "input.submit",
                   title: "Submit form",
                   group: "Form",
                   run: submit,
@@ -905,6 +935,7 @@ export function FormPrompt(props: { form: FormWithLocation }) {
                   textColor={theme.text.base}
                   focusedTextColor={theme.text.base}
                   cursorColor={theme.text.base}
+                  onSubmit={submitAnswerEdit}
                 />
               </box>
             </Show>
@@ -1049,6 +1080,7 @@ export function FormPrompt(props: { form: FormWithLocation }) {
                               if (!current || !textarea || textarea.isDestroyed) return
                               updateCustom(current, typeof value === "string" ? value : textarea.plainText)
                             }}
+                            onSubmit={submitAnswerEdit}
                           />
                         </Show>
                       </box>
@@ -1155,7 +1187,14 @@ export function FormPrompt(props: { form: FormWithLocation }) {
               if (externalField()) acknowledgeExternal()
             }}
           >
-            enter <span style={{ fg: theme.text.muted }}>{actionLabel()}</span>
+            <Show when={footerSubmitKey()}>
+              {(key) => (
+                <>
+                  {key()}{" "}
+                </>
+              )}
+            </Show>
+            <span style={{ fg: theme.text.muted }}>{actionLabel()}</span>
           </text>
           <Show when={externalField()}>
             <text fg={theme.text.base} onMouseUp={copyExternal}>

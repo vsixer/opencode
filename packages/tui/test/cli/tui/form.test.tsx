@@ -15,6 +15,15 @@ import { TestTuiContexts } from "../../fixture/tui-environment"
 import { createTuiResolvedConfig } from "../../fixture/tui-runtime"
 import { createApi, createEventStream, createFetch, json } from "../../fixture/tui-client"
 
+type KeybindOverrides = NonNullable<NonNullable<Parameters<typeof createTuiResolvedConfig>[0]>["keybinds"]>
+
+// A user remap where submit lives on ctrl+return/alt+return and plain return
+// inserts newlines in multi-line input editors, instead of the defaults.
+const remappedInputKeys: KeybindOverrides = {
+  "input.submit": "ctrl+return,alt+return",
+  "input.newline": "return",
+}
+
 async function mountForm(
   root: string,
   width = 80,
@@ -22,6 +31,7 @@ async function mountForm(
   height = 20,
   clipboardText?: string,
   response?: { reply?: 404 | 409; cancel?: 404 | 409; syncFailure?: boolean },
+  keybinds?: KeybindOverrides,
 ) {
   const state = path.join(root, "state")
   await mkdir(state, { recursive: true })
@@ -32,7 +42,7 @@ async function mountForm(
   let terminal = false
   let formLists = 0
   const events = createEventStream()
-  const config = createTuiResolvedConfig()
+  const config = createTuiResolvedConfig(keybinds ? { keybinds } : {})
   const form = {
     id: "frm_test",
     sessionID: "ses_test",
@@ -726,6 +736,178 @@ test("space does not select a single-choice option", async () => {
   try {
     prompt.app.mockInput.pressKey(" ")
     expect(prompt.app.captureCharFrame()).not.toContain("Staging ✓")
+    expect(prompt.replies).toEqual([])
+  } finally {
+    prompt.app.renderer.destroy()
+  }
+})
+
+test("remapped input keys insert a newline in a custom answer and submit with the submit key", async () => {
+  await using tmp = await tmpdir()
+  const prompt = await mountForm(
+    tmp.path,
+    80,
+    [
+      {
+        key: "target",
+        type: "string",
+        options: [{ value: "staging", label: "Staging" }],
+        custom: true,
+      },
+    ],
+    20,
+    undefined,
+    undefined,
+    remappedInputKeys,
+  )
+  try {
+    prompt.app.mockInput.pressArrow("down")
+    prompt.app.mockInput.pressEnter()
+    await prompt.app.waitFor(() => prompt.app.renderer.currentFocusedEditor !== null)
+    await prompt.app.mockInput.typeText("production")
+    await prompt.app.waitFor(() => prompt.app.renderer.currentFocusedEditor?.plainText === "production")
+
+    // Plain return is the configured newline: the edit stays open on a new line.
+    prompt.app.mockInput.pressEnter()
+    await prompt.app.waitFor(() => prompt.app.renderer.currentFocusedEditor?.plainText === "production\n")
+    expect(prompt.replies).toEqual([])
+
+    await prompt.app.mockInput.typeText("west")
+    // Alt+return is the configured submit: the single-select form replies with
+    // the full multi-line custom answer.
+    prompt.app.mockInput.pressEnter({ meta: true })
+    await prompt.app.waitFor(() => prompt.replies.length === 1)
+    expect(prompt.replies).toEqual([{ answer: { target: "production\nwest" } }])
+  } finally {
+    prompt.app.renderer.destroy()
+  }
+})
+
+test("remapped input keys keep a text field multi-line and advertise the submit key", async () => {
+  await using tmp = await tmpdir()
+  const prompt = await mountForm(
+    tmp.path,
+    80,
+    [{ key: "notes", type: "string" }],
+    20,
+    undefined,
+    undefined,
+    remappedInputKeys,
+  )
+  try {
+    await prompt.app.mockInput.typeText("draft")
+    await prompt.app.waitFor(() => prompt.app.renderer.currentFocusedEditor?.plainText === "draft")
+
+    prompt.app.mockInput.pressEnter()
+    await prompt.app.waitFor(() => prompt.app.renderer.currentFocusedEditor?.plainText === "draft\n")
+    expect(prompt.replies).toEqual([])
+
+    await prompt.app.mockInput.typeText("answer")
+    prompt.app.mockInput.pressEnter({ meta: true })
+    // The review step now advertises the first configured submit key instead of
+    // a hardcoded enter.
+    await prompt.app.waitForFrame((frame) => frame.includes("ctrl+enter submit"))
+
+    // Plain return no longer submits the review; the configured key does.
+    prompt.app.mockInput.pressEnter()
+    await prompt.app.waitForFrame((frame) => frame.includes("ctrl+enter submit"))
+    expect(prompt.replies).toEqual([])
+
+    prompt.app.mockInput.pressEnter({ meta: true })
+    await prompt.app.waitFor(() => prompt.replies.length === 1)
+    expect(prompt.replies).toEqual([{ answer: { notes: "draft\nanswer" } }])
+  } finally {
+    prompt.app.renderer.destroy()
+  }
+})
+
+test("enter keeps selecting ready options with a remapped input.submit", async () => {
+  await using tmp = await tmpdir()
+  const prompt = await mountForm(
+    tmp.path,
+    80,
+    [
+      {
+        key: "target",
+        type: "string",
+        options: [
+          { value: "staging", label: "Staging" },
+          { value: "production", label: "Production" },
+        ],
+      },
+    ],
+    20,
+    undefined,
+    undefined,
+    remappedInputKeys,
+  )
+  try {
+    // Ready-option selection stays on plain Enter; a single-select form replies
+    // immediately, which the footer advertises as its submit action.
+    expect(prompt.app.captureCharFrame()).toContain("enter submit")
+    prompt.app.mockInput.pressEnter()
+    await prompt.app.waitFor(() => prompt.replies.length === 1)
+    expect(prompt.replies).toEqual([{ answer: { target: "staging" } }])
+  } finally {
+    prompt.app.renderer.destroy()
+  }
+})
+
+test("a key-stroke object input.submit binding submits the review step", async () => {
+  await using tmp = await tmpdir()
+  const prompt = await mountForm(tmp.path, 80, [{ key: "notes", type: "string" }], 20, undefined, undefined, {
+    "input.submit": { name: "return", meta: true },
+  })
+  try {
+    await prompt.app.mockInput.typeText("draft")
+    await prompt.app.waitFor(() => prompt.app.renderer.currentFocusedEditor?.plainText === "draft")
+
+    prompt.app.mockInput.pressEnter({ meta: true })
+    // The review step accepts the same stroke-object binding: the footer shows
+    // it and Alt+Enter submits from there.
+    await prompt.app.waitForFrame((frame) => frame.includes("alt+enter submit"))
+
+    prompt.app.mockInput.pressEnter({ meta: true })
+    await prompt.app.waitFor(() => prompt.replies.length === 1)
+    expect(prompt.replies).toEqual([{ answer: { notes: "draft" } }])
+  } finally {
+    prompt.app.renderer.destroy()
+  }
+})
+
+test("an unbound input.submit hides the footer key and cannot submit the review", async () => {
+  await using tmp = await tmpdir()
+  const prompt = await mountForm(tmp.path, 80, [
+    {
+      key: "targets",
+      type: "multiselect",
+      options: [{ value: "staging", label: "Staging" }],
+      default: ["staging"],
+    },
+    {
+      key: "priority",
+      type: "multiselect",
+      options: [{ value: "now", label: "Now" }],
+      default: ["now"],
+    },
+  ], 20, undefined, undefined, { "input.submit": "none" })
+  try {
+    prompt.app.mockInput.pressEnter()
+    prompt.app.mockInput.pressEnter()
+    prompt.app.mockInput.pressArrow("right")
+    prompt.app.mockInput.pressArrow("right")
+    await prompt.app.waitForFrame((frame) => frame.includes("priority: Now"))
+
+    // No key is advertised for the submit action when input.submit is unbound…
+    const frame = prompt.app.captureCharFrame()
+    expect(frame).not.toContain("enter submit")
+    expect(frame).not.toContain("ctrl+enter submit")
+    expect(frame).toContain("submit")
+
+    // …and Enter cannot submit the review. The mouse label stays as the
+    // remaining submission path.
+    prompt.app.mockInput.pressEnter()
+    await prompt.app.waitForFrame((frame) => frame.includes("priority: Now"))
     expect(prompt.replies).toEqual([])
   } finally {
     prompt.app.renderer.destroy()

@@ -10,6 +10,7 @@ import { useRenderer, useTerminalDimensions } from "@opentui/solid"
 import { batch, createEffect, createMemo, createResource, createSignal, on, onCleanup, Show } from "solid-js"
 import { useConfig } from "../config"
 import { useData } from "../context/data"
+import { useBtw } from "../context/btw"
 import { Keymap } from "../context/keymap"
 import { InteractivityProvider } from "../context/interactivity"
 import { useSessionTerminals } from "../context/session-terminals"
@@ -104,8 +105,16 @@ export function SessionFrame(props: { sessionID: string; verticalTabsWidth: numb
     }),
   )
   const wide = createMemo(() => dimensions().width - props.verticalTabsWidth > 120)
+  const btw = useBtw()
+  // The btw side chat takes the right half of the full session row, so while it
+  // is open for this session the sidebar hides and reappears with its previous
+  // visibility once the panel closes. This is a derived overlay: neither the
+  // manual sidebarOpen flag nor the configured sidebar preference is modified,
+  // so the pre-btw state (including a hidden sidebar) restores itself.
+  const btwActive = createMemo(() => btw.state()?.parentID === props.sessionID)
   const sidebarVisible = createMemo(() => {
     if (data.session.get(props.sessionID)?.parentID) return false
+    if (btwActive()) return false
     if (sidebarOpen()) return true
     return (config.data.session?.sidebar ?? "auto") === "auto" && wide()
   })
@@ -188,6 +197,9 @@ export function SessionFrame(props: { sessionID: string; verticalTabsWidth: numb
         title: rightPane() === "sidebar" ? "Hide sidebar" : "Show sidebar",
         group: "Session",
         palette: true,
+        // The sidebar is overlay-hidden while the btw panel owns the right half,
+        // so toggling mid-btw would persist a preference the layout cannot show.
+        enabled: () => !btwActive(),
         run: () => {
           toggleSidebar()
           dialog.clear()

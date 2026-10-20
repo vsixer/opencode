@@ -8,11 +8,15 @@ import { directory, json } from "../../fixture/tui-client"
 import { tmpdir } from "../../fixture/fixture"
 
 // Раскладка btw-панели в реальном фрейме сессии:
-//  1. панель и основная колонка делят строку сессии ровно пополам (50/50);
-//  2. открытая панель не трогает сайдбар сессии — он остаётся смонтированным
-//     до открытия, во время и после закрытия (same renderable, те же 42 колонки).
+//  1. открытая панель на время своей жизни прячет сайдбар сессии — панель и
+//     основная колонка делят полную ширину строки сессии ровно пополам (50/50);
+//  2. закрытие восстанавливает прежнюю видимость сайдбара: видимый до открытия
+//     возвращается, скрытый до открытия остаётся скрытым.
 
-async function createSessionFixture(state: string, input: { width?: number } = {}) {
+async function createSessionFixture(
+  state: string,
+  input: { width?: number; sidebar?: "auto" | "hide" } = {},
+) {
   const session = {
     id: `ses_btw_layout_${crypto.randomUUID()}`,
     title: "Btw layout fixture",
@@ -33,8 +37,9 @@ async function createSessionFixture(state: string, input: { width?: number } = {
     config: {
       animations: false,
       tabs: { enabled: false },
-      // Sidebar visible by width (auto + >120 columns), so the test can pin it across btw open/close.
-      session: { sidebar: "auto" },
+      // "auto" keeps the sidebar visible by width (>120 columns), so the test can
+      // pin its absence during btw and its return after closing.
+      session: { sidebar: input.sidebar ?? "auto" },
       diffs: { tree: false, view: "unified" },
     },
     fetch: async (url) => {
@@ -100,6 +105,12 @@ function sidebar(setup: AppFixture): Renderable {
   return deepest
 }
 
+function sidebarMounted(setup: AppFixture): boolean {
+  return descendants(setup.renderer.root).some(
+    (item) => item.width === SESSION_SIDEBAR_WIDTH && item.x + item.width === setup.renderer.width,
+  )
+}
+
 async function openBtw(setup: AppFixture) {
   setup.mockInput.typeText("/btw")
   await setup.waitForFrame((frame) => frame.includes("Open btw side chat"))
@@ -115,36 +126,85 @@ async function closeBtw(setup: AppFixture) {
   await setup.flush()
 }
 
-test.each([160, 161])("btw panel splits the session area in half and keeps the sidebar mounted at width %i", async (width) => {
+test.each([160, 161])("btw panel hides the sidebar and splits the full session row in half at width %i", async (width) => {
   await using state = await tmpdir()
   await using setup = await createSessionFixture(state.path, { width })
   await ready(setup)
 
-  const sidebarBefore = sidebar(setup)
   const content = () => node(setup, "session-content")
   expect(setup.renderer.root.findDescendantById("btw-panel")).toBeUndefined()
-  // Session row = terminal width minus the sidebar columns; let the flex layout settle
-  // (startup frames may transiently measure mid-mount) before pinning the baseline.
-  const rowWidth = sidebarBefore.x
-  await setup.waitFor(() => content().width === rowWidth)
+  // Vertical tabs are disabled, so the session row is the whole terminal; let the
+  // flex layout settle (startup frames may transiently measure mid-mount).
+  const rowWidth = setup.renderer.width
+  await setup.waitFor(() => content().width === rowWidth - SESSION_SIDEBAR_WIDTH)
   const contentBefore = content().width
+  const sidebarBeforeX = sidebar(setup).x
 
   await openBtw(setup)
 
   const btw = node(setup, "btw-panel")
-  const sidebarDuring = sidebar(setup)
-  // Halves of an odd session row differ by one column (floor split).
+  // The sidebar is hidden while btw is open: panel and main column split the
+  // whole row. Halves of an odd row differ by one column (floor split).
+  expect(sidebarMounted(setup)).toBe(false)
   expect(Math.abs(btw.width - content().width)).toBeLessThanOrEqual(1)
   expect(content().width + btw.width).toBe(rowWidth)
   expect(btw.x).toBe(content().x + content().width)
-  expect(sidebarDuring).toBe(sidebarBefore)
-  expect(sidebarDuring.x).toBe(btw.x + btw.width)
   expect(content().width).toBeGreaterThan(0)
 
   await closeBtw(setup)
 
-  await setup.waitFor(() => content().width === rowWidth)
+  await setup.waitFor(() => content().width === contentBefore)
   expect(setup.renderer.root.findDescendantById("btw-panel")).toBeUndefined()
-  expect(sidebar(setup)).toBe(sidebarBefore)
-  expect(content().width).toBe(contentBefore)
+  const sidebarAfter = sidebar(setup)
+  expect(sidebarAfter.width).toBe(SESSION_SIDEBAR_WIDTH)
+  expect(sidebarAfter.x).toBe(sidebarBeforeX)
+})
+
+test("btw leaves an already hidden sidebar hidden after closing", async () => {
+  await using state = await tmpdir()
+  await using setup = await createSessionFixture(state.path, { width: 160, sidebar: "hide" })
+  await ready(setup)
+
+  const content = () => node(setup, "session-content")
+  expect(sidebarMounted(setup)).toBe(false)
+  await setup.waitFor(() => content().width === setup.renderer.width)
+
+  await openBtw(setup)
+
+  const btw = node(setup, "btw-panel")
+  expect(sidebarMounted(setup)).toBe(false)
+  expect(Math.abs(btw.width - content().width)).toBeLessThanOrEqual(1)
+
+  await closeBtw(setup)
+
+  await setup.waitFor(() => content().width === setup.renderer.width)
+  expect(setup.renderer.root.findDescendantById("btw-panel")).toBeUndefined()
+  expect(sidebarMounted(setup)).toBe(false)
+})
+
+test("the sidebar toggle stays inert while btw is open", async () => {
+  await using state = await tmpdir()
+  await using setup = await createSessionFixture(state.path, { width: 160 })
+  await ready(setup)
+
+  const content = () => node(setup, "session-content")
+  const rowWidth = setup.renderer.width
+  await setup.waitFor(() => content().width === rowWidth - SESSION_SIDEBAR_WIDTH)
+
+  await openBtw(setup)
+  expect(sidebarMounted(setup)).toBe(false)
+
+  // <leader>v (session.sidebar.toggle) must not fight the btw overlay: the
+  // sidebar stays hidden and the split stays intact.
+  setup.mockInput.pressKey("x", { ctrl: true })
+  setup.mockInput.pressKey("v")
+  await setup.flush()
+  expect(sidebarMounted(setup)).toBe(false)
+  expect(setup.renderer.root.findDescendantById("btw-panel")).toBeDefined()
+  expect(content().width + node(setup, "btw-panel").width).toBe(rowWidth)
+
+  await closeBtw(setup)
+  // The ignored toggle must not have persisted a hide: the sidebar returns.
+  await setup.waitFor(() => content().width === rowWidth - SESSION_SIDEBAR_WIDTH)
+  expect(sidebarMounted(setup)).toBe(true)
 })
